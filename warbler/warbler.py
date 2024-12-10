@@ -6,7 +6,14 @@ from . import databpy as db
 
 
 class Warbler:
-    def __init__(self, num_particles: int, substeps: int = 5, links: bool = False):
+    def __init__(
+        self,
+        num_particles: int,
+        substeps: int = 5,
+        links: bool = False,
+        up_vector=(0, 0, 1),
+        ivelocity=(0, 0, 10),
+    ):
         # Initialize Warp
         wp.init()
 
@@ -17,7 +24,7 @@ class Warbler:
         self.scale = 1
 
         # Create builder for simulation
-        builder = sim.ModelBuilder(up_vector=wp.vec3(0, 0, 1))
+        builder = sim.ModelBuilder(up_vector=wp.vec3(*up_vector))
         builder.default_particle_radius = self.radius
 
         n_x = int(num_particles ** (1 / 3))
@@ -43,7 +50,7 @@ class Warbler:
             cell_z=0.1 * 2.0,
             pos=wp.vec3(-1.0, 0.0, 0.0),
             rot=wp.quat_identity(),
-            vel=wp.vec3(0.0, 0.0, 10.0),
+            vel=wp.vec3(*ivelocity),
             mass=1,
             jitter=self.radius * 0.1,
         )

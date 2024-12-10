@@ -15,7 +15,7 @@ https://github.com/user-attachments/assets/271fc06d-f851-4935-807a-313d8bdfa687
 
 Clone the add-on, then run the build script through Blender or a compatible python that is `3.11`. This will create a `warbler_X.X.X.zip` that can be installed through Blender's regular add-on installation.
 
-```
+```bash
 git clone git@github.com:BradyAJohnston/warbler.git
 cd warbler
 blender -b -P build.py
