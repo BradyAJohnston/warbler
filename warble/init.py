@@ -1,6 +1,8 @@
 import bpy
 
-CLASSES = []
+from . import ops
+
+CLASSES = ops.CLASSES
 
 
 def register():
