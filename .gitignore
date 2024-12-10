@@ -1,6 +1,0 @@
-
-*.whl
-*.zip
-*.pyc
-/docs/_site
-/docs/_build
