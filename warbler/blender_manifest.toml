@@ -1,12 +1,12 @@
 schema_version = "1.0.0"
 
-id = "warble"
+id = "warbler"
 version = "0.0.1"
-name = "warble"
+name = "warbler"
 tagline = "Interactive GPU simulations"
 maintainer = "Brady Johnston <brady.johnston@me.com>"
 type = "add-on"
-website = "https://bradyajohnston.github.io/warble"
+website = "https://bradyajohnston.github.io/warbler"
 tags = [
 	"3D View",
 	"Animation",
