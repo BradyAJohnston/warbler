@@ -14,8 +14,9 @@ class SimulationManager:
 
 @persistent
 def update_simulations(scene: bpy.types.Scene) -> None:
-    manager: SimulationManager = scene.SimulationManager
-    manager.step_simulations()
+    if hasattr(scene, "SimulationManager"):
+        manager: SimulationManager = scene.SimulationManager
+        manager.step_simulations()
 
 
 def _step_simulations(self, context: bpy.types.Context) -> None:

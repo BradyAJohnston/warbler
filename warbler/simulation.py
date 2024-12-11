@@ -25,7 +25,11 @@ class Simulation:
         self.scale = 1
         self.objects = objects
         self.clock = 0
-        self.dt = 1 / bpy.context.scene.render.fps
+        self.fps = bpy.context.scene.render.fps
+        self.frame_dt = 1 / self.fps
+        self.ke = 1.0e5
+        self.kd = 250.0
+        self.kf = 500.0
 
         # Create builder for simulation
         builder = sim.ModelBuilder(up_vector=wp.vec3(*up_vector))
@@ -43,6 +47,12 @@ class Simulation:
                     hx=obj.scale[0],
                     hy=obj.scale[1],
                     hz=obj.scale[2],
+                    kd=self.kd,
+                    ke=self.ke,
+                    kf=self.kf,
+                    ka=0.1,
+                    mu=1.0,
+                    restitution=100,
                     body=b,
                 )
             else:
@@ -84,6 +94,39 @@ class Simulation:
         # Create mesh object for visualization
         self.create_particle_mesh()
 
+    def set_obj_from_simulation(self):
+        self.rigid_transforms = self.state_0.body_q.numpy()
+        for i, obj in enumerate(self.objects):
+            if not obj.wb.rigid_is_active:
+                continue
+            obj.location = self.rigid_transforms[i, 0:3]
+            obj.rotation_quaternion = self.rigid_transforms[i, 3:7]
+
+    def set_simulation_from_obj(self):
+        new_transforms = []
+        current_sim_transforms = self.state_0.body_q.numpy()
+
+        if self.state_0.body_q is None:
+            return None
+
+        for i, obj in enumerate(self.objects):
+            obj.rotation_mode = "QUATERNION"
+
+            if not obj.wb.rigid_is_active or self.clock == 0:
+                rot = obj.rotation_quaternion
+                new_transforms.append(
+                    wp.transform(wp.vec3(*obj.location), wp.quat(*rot))
+                )
+            else:
+                new_transforms.append(
+                    wp.transform(
+                        wp.vec3(current_sim_transforms[i, 0:3]),
+                        wp.quat(current_sim_transforms[i, 3:7]),
+                    )
+                )
+
+        self.state_0.body_q.assign(new_transforms)
+
     def create_particle_mesh(self):
         name = "ParticleObject"
         try:
@@ -107,14 +150,14 @@ class Simulation:
         self.state_1.clear_forces()
         self.model.particle_grid.build(self.state_0.particle_q, self.radius * 2)
         sim.collide(self.model, self.state_0)
-        self.integrator.apply_body_deltas(
-            self.model,
-            self.state_0,
-            self.state_1,
-            body_deltas=self.state_0.body_qd,
-            dt=self.dt,
-        )
-        self.integrator.simulate(self.model, self.state_0, self.state_1, self.dt)
+        # self.integrator.apply_body_deltas(
+        #     self.model,
+        #     self.state_0,
+        #     self.state_1,
+        #     body_deltas=self.state_0.body_qd,
+        #     dt=self.frame_dt,
+        # )
+        self.integrator.simulate(self.model, self.state_0, self.state_1, self.frame_dt)
         # swap states
         (self.state_0, self.state_1) = (self.state_1, self.state_0)
 
@@ -124,41 +167,10 @@ class Simulation:
     def step(self):
         # get the blender object the user is interacting with and extract
         # the transformations from it
-        try:
-            new_transforms = []
-            if self.state_0.body_q is None:
-                raise ValueError("No rigid bodies, running simulation without them")
 
-            for i in range(len(self.state_0.body_q)):
-                obj = self.objects[i]
-
-                # for the very first frame, we want to set the initial positions
-                # but afterwards we only update them manually if the object is not active
-                if obj.wb.rigid_is_active and self.clock > 0:
-                    continue
-
-                if obj.rotation_mode == "QUATERNION":
-                    rot = obj.rotation_quaternion
-                elif obj.rotation_mode == "XYZ":
-                    rot = obj.rotation_euler.to_quaternion()
-                else:
-                    raise ValueError(f"Unsupported rotation {obj.rotation_type}")
-
-                new_transforms.append(
-                    wp.transform(wp.vec3(*obj.location), wp.quat(*rot))
-                )
-            self.state_0.body_q.assign(new_transforms)
-        except (KeyError, ValueError):
-            pass
-
-        # Run simulation substeps
+        self.set_simulation_from_obj()
         self.simulate()
-
-        for i, obj in enumerate(self.objects):
-            if not obj.wb.rigid_is_active:
-                continue
-            transform = self.state_0.body_q.numpy()[i]
-            obj.location, obj.rotation_quaternion = transform[0:3], transform[3:7]
+        self.set_obj_from_simulation()
 
         # Update particle mesh
         self.particle_obj.position = self.particle_positions
