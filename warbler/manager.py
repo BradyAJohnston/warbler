@@ -1,11 +1,11 @@
-from .warbler import Warbler
+from .simulation import Simulation
 import bpy
 from bpy.app.handlers import persistent
 
 
 class SimulationManager:
     def __init__(self):
-        self.simulation: Warbler | None = None
+        self.simulation: Simulation | None = None
 
     def step_simulations(self):
         if self.simulation is not None:

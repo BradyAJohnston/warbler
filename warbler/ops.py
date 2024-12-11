@@ -1,6 +1,6 @@
 from bpy.types import Operator
 from .manager import SimulationManager
-from .warbler import Warbler
+from .simulation import Simulation
 from bpy.props import IntProperty, BoolProperty, FloatVectorProperty
 
 
@@ -21,19 +21,16 @@ class WB_OT_StartSimulation(Operator):
         max=20,
         min=0,
     )
-
     velocity: FloatVectorProperty(  # type: ignore
         name="Initial Velocity",
         description="Initial velocity for the particles when starting the simulation",
-        default=(0, 0, 10),
+        default=[0, 0, 10],
     )
-
     upvector: FloatVectorProperty(  # type: ignore
         name="Up Vector",
         description="Determins the orientation of the physics world, inputing the up vector for all calculations",
-        default=(0, 0, 1),
+        default=[0, 0, 1],
     )
-
     springs: BoolProperty(  # type: ignore
         name="Springs",
         description="Create springs between succesive points for linking together in the simulation",
@@ -47,10 +44,11 @@ class WB_OT_StartSimulation(Operator):
 
     def execute(self, context):
         manager: SimulationManager = context.scene.SimulationManager
-        manager.simulation = Warbler(
+        manager.simulation = Simulation(
             num_particles=self.n_particles,
             substeps=self.substeps,
             links=self.springs,
+            objects=[obj for obj in context.selected_objects],
             up_vector=self.upvector,
             ivelocity=self.velocity,
         )
