@@ -29,7 +29,7 @@ except ModuleNotFoundError:
     run_python("-m pip install tomlkit")
     import tomlkit
 
-DIR = "warble"
+DIR = "warbler"
 toml_path = f"./{DIR}/blender_manifest.toml"
 whl_path = f"./{DIR}/wheels"
 
