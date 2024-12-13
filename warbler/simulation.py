@@ -20,7 +20,7 @@ class Simulation:
 
         # Initialize simulation parameters
         self.num_particles = num_particles
-        self.radius = 0.15
+        self.radius = 0.4
         self.frame_dt = 1.0 / 24  # 60 fps
         self.scale = 1
         self.objects = objects
@@ -95,6 +95,8 @@ class Simulation:
         self.create_particle_mesh()
 
     def set_obj_from_simulation(self):
+        if self.state_0.body_q is None:
+            return None
         self.rigid_transforms = self.state_0.body_q.numpy()
         for i, obj in enumerate(self.objects):
             if not obj.wb.rigid_is_active:
@@ -104,6 +106,8 @@ class Simulation:
 
     def set_simulation_from_obj(self):
         new_transforms = []
+        if self.state_0.body_q is None:
+            return None
         current_sim_transforms = self.state_0.body_q.numpy()
 
         if self.state_0.body_q is None:
@@ -137,6 +141,10 @@ class Simulation:
                 self.particle_positions, edges=self.edges, name=name
             )
 
+        self.particle_obj.store_named_attribute(
+            np.repeat(self.radius, self.num_particles), "radius"
+        )
+
     @property
     def particle_positions(self) -> np.ndarray:
         return self.state_0.particle_q.numpy()
@@ -150,14 +158,8 @@ class Simulation:
         self.state_1.clear_forces()
         self.model.particle_grid.build(self.state_0.particle_q, self.radius * 2)
         sim.collide(self.model, self.state_0)
-        # self.integrator.apply_body_deltas(
-        #     self.model,
-        #     self.state_0,
-        #     self.state_1,
-        #     body_deltas=self.state_0.body_qd,
-        #     dt=self.frame_dt,
-        # )
         self.integrator.simulate(self.model, self.state_0, self.state_1, self.frame_dt)
+
         # swap states
         (self.state_0, self.state_1) = (self.state_1, self.state_0)
 
