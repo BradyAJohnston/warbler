@@ -8,6 +8,25 @@ from bpy.props import (
 )
 
 
+class WarblerSceneProperties(PropertyGroup):
+    rigid_decay_frames: IntProperty(  # type: ignore
+        name="Rigid Input Smoothing",
+        description="Number of frames to move the inputs of the rigid body over",
+        default=5,
+        min=1,
+    )
+    simulation_substeps: IntProperty(  # type: ignore
+        name="Simulation Substeps",
+        description="Number of substeps per frame",
+        default=5,
+    )
+    simulation_links: BoolProperty(  # type: ignore
+        name="Simulation Links",
+        description="Enable links between objects in the simulation",
+        default=False,
+    )
+
+
 class WarblerObjectProperties(PropertyGroup):
     uuid: StringProperty(  # type: ignore
         name="UUID",
@@ -40,4 +59,4 @@ class WarblerObjectProperties(PropertyGroup):
     )
 
 
-CLASSES = [WarblerObjectProperties]
+CLASSES = [WarblerObjectProperties, WarblerSceneProperties]

@@ -32,6 +32,7 @@ except ModuleNotFoundError:
 DIR = "warbler"
 toml_path = f"./{DIR}/blender_manifest.toml"
 whl_path = f"./{DIR}/wheels"
+PYPROJ_PATH = "pyproject.toml"
 
 
 @dataclass
@@ -49,13 +50,13 @@ linux_x64 = Platform(pypi_suffix="manylinux2014_x86_64", metadata="linux-x64")
 macos_arm = Platform(pypi_suffix="macosx_12_0_arm64", metadata="macos-arm64")
 macos_intel = Platform(pypi_suffix="macosx_10_16_x86_64", metadata="macos-x64")
 
-
-required_packages = ["warp-lang==1.5.0"]
-
+with open(PYPROJ_PATH, "r") as file:
+    pyproj = tomlkit.parse(file.read())
+    required_packages: list = pyproj["project"]["dependencies"]
 
 build_platforms = [
     windows_x64,
-    linux_x64,
+    # linux_x64,
     # macos_arm,
     # macos_intel,
 ]

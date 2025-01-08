@@ -20,7 +20,6 @@ license = [
 ]
 platforms = [
 	"windows-x64",
-	"linux-x64",
 ]
 
 # # Optional: bundle 3rd party Python modules.
@@ -30,8 +29,8 @@ platforms = [
 #   "./wheels/jsmin-3.0.1-py3-none-any.whl",
 # ]
 wheels = [
-	"./wheels/warp_lang-1.5.0-py3-none-manylinux2014_x86_64.whl",
-	"./wheels/warp_lang-1.5.0-py3-none-win_amd64.whl",
+	"./wheels/databpy-0.0.7-py3-none-any.whl",
+	"./wheels/warp_lang-1.5.1-py3-none-win_amd64.whl",
 ]
 
 [permissions]

@@ -11,6 +11,7 @@ class WB_PT_WarblerPanel(Panel):
         layout = self.layout
         layout.operator("wb.start_simulation")
         layout.label(text="Simulation Settings")
+        layout.prop(context.scene.wb, "rigid_decay_frames")
         obj = context.active_object
         if obj is None:
             return

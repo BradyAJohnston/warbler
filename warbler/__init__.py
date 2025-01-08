@@ -16,6 +16,7 @@ def register():
         register_class(cls)
     bpy.types.Scene.SimulationManager = SimulationManager()
     bpy.types.Object.wb = PointerProperty(type=props.WarblerObjectProperties)
+    bpy.types.Scene.wb = PointerProperty(type=props.WarblerSceneProperties)
     frame_change_post.append(_step_simulations)
 
 
@@ -24,4 +25,7 @@ def unregister():
         unregister_class(cls)
     del bpy.types.Scene.SimulationManager
     del bpy.types.Object.wb
-    frame_change_post.remove(_step_simulations)
+    try:
+        frame_change_post.remove(_step_simulations)
+    except ValueError:
+        pass

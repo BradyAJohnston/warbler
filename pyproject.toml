@@ -4,4 +4,10 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["bpy>=4.2","warp-lang>=1.5", "numpy>=1.26,<2.0"]
+dependencies = ["warp-lang>=1.5", "databpy"]
+
+[project.optional-dependencies]
+bpy =  ["bpy>=4.2"]
+dev = ["pytest", "pytest-cov", "syrupy", "scipy", "fake-bpy-module"]
+test = ["pytest", "pytest-cov", "syrupy", "scipy"]
+docs = ["quartodoc", "tomlkit"]
