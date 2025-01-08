@@ -20,16 +20,17 @@ class Simulation:
         wp.init()
 
         # Initialize simulation parameters
-        self.num_particles = num_particles
-        self.radius = 0.4
-        self.scale = 1
-        self.objects = objects
-        self.clock = 0
-        self.fps = bpy.context.scene.render.fps
-        self.frame_dt = 1 / self.fps
-        self.ke = 1.0e5
-        self.kd = 250.0
-        self.kf = 500.0
+        self.num_particles: int = num_particles
+        self.radius: float = 0.4
+        self.scale: float = 1.0
+        self.objects: list = objects
+        self.clock: int = 0
+        self.fps: int = bpy.context.scene.render.fps
+        self.frame_dt: float = 1 / self.fps
+        self.ke: float = 1.0e5
+        self.kd: float = 250.0
+        self.kf: float = 500.0
+        self.bob: db.BlenderObject | None = None
 
         # Create builder for simulation
         builder = sim.ModelBuilder(up_vector=wp.vec3(*up_vector))
@@ -140,7 +141,15 @@ class Simulation:
     def create_particle_mesh(self):
         name = "ParticleObject"
         try:
-            self.particle_obj = db.BlenderObject(bpy.data.objects[name])
+            obj = bpy.data.objects[name]
+            if len(obj.data.vertices) != self.num_particles:
+                bpy.data.objects.remove(obj)
+                obj = db.create_object(
+                    self.particle_positions, edges=self.edges, name=name
+                )
+
+            self.particle_obj = db.BlenderObject(obj)
+
             self.particle_obj.position = self.particle_positions
         except KeyError:
             self.particle_obj = db.create_bob(
