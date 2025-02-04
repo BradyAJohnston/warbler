@@ -13,8 +13,6 @@ jobs:
   build-docs:
     runs-on: ubuntu-latest
     permissions: write-all
-    env:
-      BLENDER_VERSION: blender-4.2.0-linux-x64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
