@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "warbler"
-version = "0.0.1"
+version = "0.0.5"
 name = "warbler"
 tagline = "Interactive GPU simulations"
 maintainer = "Brady Johnston <brady.johnston@me.com>"

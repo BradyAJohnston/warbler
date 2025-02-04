@@ -1,0 +1,28 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - uses: actions/checkout@v4
+      - uses: BradyAJohnston/setup-blender@v2.1
+        with:
+            version: 4.3.2
+      - name: Build Extension
+        run: |
+          blender -b -P build.py
+
+      - name: Create Release
+        run: |
+          # Create release with auto-generated notes
+          gh release create ${{ github.ref_name }} --generate-notes *.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
