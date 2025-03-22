@@ -21,8 +21,8 @@ platforms = [
 	"windows-x64",
 ]
 wheels = [
-	"./wheels/databpy-0.0.7-py3-none-any.whl",
-	"./wheels/warp_lang-1.5.1-py3-none-win_amd64.whl",
+	"./wheels/databpy-0.0.16-py3-none-any.whl",
+	"./wheels/warp_lang-1.6.2-py3-none-win_amd64.whl",
 ]
 [permissions]
 files = "Saving cached simulations to disk"

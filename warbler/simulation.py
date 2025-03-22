@@ -21,7 +21,7 @@ class Simulation:
 
         # Initialize simulation parameters
         self.num_particles: int = num_particles
-        self.radius: float = 0.4
+        self.radius: float = 0.1
         self.scale: float = 1.0
         self.objects: list = objects
         self.clock: int = 0
@@ -42,9 +42,9 @@ class Simulation:
 
         for obj in objects:
             b = builder.add_body(m=1e5)
-            if obj.wb.rigid_shape == "CUBE":
-                obj.wb.rigid_body_index = builder.add_shape_box(
-                    pos=wp.vec3(0, 0, 0),
+            if obj.wb.rigid_shape == "CUBE":  # type: ignore
+                obj.wb.rigid_body_index = builder.add_shape_box(  # type: ignore
+                    pos=wp.vec3(0, 0, 0),  # type: ignore
                     hx=obj.scale[0],
                     hy=obj.scale[1],
                     hz=obj.scale[2],
@@ -57,7 +57,7 @@ class Simulation:
                     body=b,
                 )
             else:
-                print(Warning(f"Unsupported shape {obj.wb.rigid_shape}"))
+                print(Warning(f"Unsupported shape {obj.wb.rigid_shape}"))  # type: ignore
 
         builder.add_particle_grid(
             dim_x=n_x,
@@ -66,9 +66,9 @@ class Simulation:
             cell_x=0.1 * 2.0,
             cell_y=0.1 * 2.0,
             cell_z=0.1 * 2.0,
-            pos=wp.vec3(-1.0, 0.0, 0.0),
-            rot=wp.quat_identity(),
-            vel=wp.vec3(*ivelocity),
+            pos=wp.vec3(-1.0, 0.0, 0.0),  # type: ignore
+            rot=wp.quat_identity(),  # type: ignore
+            vel=wp.vec3(*ivelocity),  # type: ignore
             mass=1,
             jitter=self.radius * 0.1,
         )
@@ -124,7 +124,9 @@ class Simulation:
                 loc = np.array(obj.location)
                 if self.clock != 0:
                     loc = smooth_lerp(
-                        loc_in_sim, loc, bpy.context.scene.wb.rigid_decay_frames
+                        loc_in_sim,
+                        loc,
+                        bpy.context.scene.wb.rigid_decay_frames,  # type: ignore
                     )
 
                 trans = wp.transform(wp.vec3(*loc), wp.quat(*rot))
@@ -142,7 +144,7 @@ class Simulation:
         name = "ParticleObject"
         try:
             obj = bpy.data.objects[name]
-            if len(obj.data.vertices) != self.num_particles:
+            if len(obj.data.vertices) != self.num_particles:  # type: ignore
                 bpy.data.objects.remove(obj)
                 obj = db.create_object(
                     self.particle_positions, edges=self.edges, name=name
@@ -153,7 +155,9 @@ class Simulation:
             self.particle_obj.position = self.particle_positions
         except KeyError:
             self.particle_obj = db.create_bob(
-                self.particle_positions, edges=self.edges, name=name
+                self.particle_positions,
+                edges=self.edges,  # type: ignore
+                name=name,
             )
 
         self.particle_obj.store_named_attribute(
@@ -162,18 +166,18 @@ class Simulation:
 
     @property
     def particle_positions(self) -> np.ndarray:
-        return self.state_0.particle_q.numpy()
+        return self.state_0.particle_q.numpy()  # type: ignore
 
     @property
     def velocity(self) -> np.ndarray:
-        return self.state_0.particle_qd.numpy()
+        return self.state_0.particle_qd.numpy()  # type: ignore
 
     def simulate(self):
         self.state_0.clear_forces()
-        self.state_1.clear_forces()
-        self.model.particle_grid.build(self.state_0.particle_q, self.radius * 2)
+        # self.state_1.clear_forces()
+        self.model.particle_grid.build(self.state_0.particle_q, self.radius * 2)  # type: ignore
         sim.collide(self.model, self.state_0)
-        self.integrator.simulate(self.model, self.state_0, self.state_1, self.frame_dt)
+        self.integrator.simulate(self.model, self.state_0, self.state_1, self.frame_dt)  # type: ignore
 
         # swap states
         (self.state_0, self.state_1) = (self.state_1, self.state_0)
