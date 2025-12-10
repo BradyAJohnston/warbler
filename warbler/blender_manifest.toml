@@ -1,5 +1,4 @@
 schema_version = "1.0.0"
-
 id = "warbler"
 version = "0.0.6"
 name = "warbler"
@@ -7,22 +6,25 @@ tagline = "Interactive GPU simulations"
 maintainer = "Brady Johnston <brady.johnston@me.com>"
 type = "add-on"
 website = "https://bradyajohnston.github.io/warbler"
+blender_version_min = "4.2.0"
+platforms = [
+	"linux-x64",
+]
 tags = [
 	"3D View",
 	"Animation",
 	"Bake",
 	"Physics",
 ]
-blender_version_min = "4.2.0"
 license = [
-    "SPDX:GPL-3.0-or-later",
+	"SPDX:GPL-3.0-or-later",
 ]
-platforms = [
-	"windows-x64",
-]
+
 wheels = [
-	"./wheels/databpy-0.0.16-py3-none-any.whl",
-	"./wheels/warp_lang-1.6.2-py3-none-win_amd64.whl",
+	"./wheels/databpy-0.6.0-py3-none-any.whl",
+	"./wheels/warp_lang-1.5.1-py3-none-manylinux2014_x86_64.whl",
 ]
+
 [permissions]
 files = "Saving cached simulations to disk"
+
