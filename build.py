@@ -124,6 +124,14 @@ def update_toml_whls(platforms):
     with open(TOML_PATH, "rb") as file:
         manifest = tomllib.load(file)
 
+    # Load pyproject.toml to sync version and description
+    with open(PYPROJ_PATH, "rb") as file:
+        pyproject = tomllib.load(file)
+
+    # Update version and tagline from pyproject.toml
+    manifest["version"] = pyproject["project"]["version"]
+    manifest["tagline"] = pyproject["project"]["description"]
+
     # Update the wheels list with the remaining wheel files
     manifest["wheels"] = [f"./wheels/{os.path.basename(whl)}" for whl in to_keep]
 
