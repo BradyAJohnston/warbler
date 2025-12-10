@@ -36,6 +36,11 @@ class WB_OT_StartSimulation(Operator):
         description="Create springs between succesive points for linking together in the simulation",
         default=False,
     )
+    add_ground: BoolProperty(  # type: ignore
+        name="Add Ground Plane",
+        description="Add a ground plane to the simulation for objects and particles to collide with",
+        default=True,
+    )
 
     def invoke(self, context, event):
         if context.area and context.area.type == "VIEW_3D":
@@ -51,6 +56,7 @@ class WB_OT_StartSimulation(Operator):
             objects=[obj for obj in context.selected_objects],
             up_vector=self.upvector,
             ivelocity=self.velocity,
+            add_ground=self.add_ground,
         )
         self.report({"INFO"}, "Simulation compiled on the GPU")
         return {"FINISHED"}

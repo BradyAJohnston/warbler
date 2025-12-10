@@ -413,6 +413,17 @@ wheels = [
 ]
 
 [[package]]
+name = "newton"
+version = "0.1.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "warp-lang" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a2/ba/cb5d160d2f2094532492d7b1509ccedbf23f198830dc8eb7f4d52740e367/newton-0.1.3-py3-none-any.whl", hash = "sha256:dbbf27f93211c64c9b0a4a93f40be7669489f20c43bf38a40e9c568b782d8a0e", size = 1507922, upload-time = "2025-09-26T16:10:23.323Z" },
+]
+
+[[package]]
 name = "numpy"
 version = "1.26.4"
 source = { registry = "https://pypi.org/simple" }
@@ -908,8 +919,8 @@ version = "0.0.7"
 source = { virtual = "." }
 dependencies = [
     { name = "databpy" },
+    { name = "newton" },
     { name = "numpy" },
-    { name = "warp-lang" },
 ]
 
 [package.optional-dependencies]
@@ -939,6 +950,7 @@ requires-dist = [
     { name = "bpy", marker = "extra == 'bpy'", specifier = ">=4.4" },
     { name = "databpy", specifier = ">=0.6.0" },
     { name = "fake-bpy-module", marker = "extra == 'dev'" },
+    { name = "newton", specifier = ">=0.1.3" },
     { name = "numpy", specifier = ">=1.26,<2.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'test'" },
@@ -950,22 +962,21 @@ requires-dist = [
     { name = "syrupy", marker = "extra == 'dev'" },
     { name = "syrupy", marker = "extra == 'test'" },
     { name = "tomlkit", marker = "extra == 'docs'" },
-    { name = "warp-lang", specifier = ">=1.5" },
 ]
 provides-extras = ["bpy", "dev", "test", "docs"]
 
 [[package]]
 name = "warp-lang"
-version = "1.5.1"
+version = "1.10.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/17/ce/4e690f1d9c55672d875c109520b85cd536cec74ca3120cf2e910ae4b700d/warp_lang-1.5.1-py3-none-macosx_10_13_universal2.whl", hash = "sha256:f9828f3d9301f60a0b4b82d797dd4e9dced73537c9758ed992150cadba42416d", size = 44361002, upload-time = "2025-01-03T06:50:17.906Z" },
-    { url = "https://files.pythonhosted.org/packages/4a/98/643a7ee0c961aa2ab1a8f12fb5a688499233bbce4707981daa8d486234e9/warp_lang-1.5.1-py3-none-manylinux2014_aarch64.whl", hash = "sha256:b1f9fcd62715d8cee29ba6472ac5f10736b77161f35fd218867c0cdd6fedc06c", size = 84345794, upload-time = "2025-01-03T06:50:28.633Z" },
-    { url = "https://files.pythonhosted.org/packages/78/c0/5045d31d572ee4af33d1f6b0dc3ca0c42d2a51e16d10ed051d4e4971fc23/warp_lang-1.5.1-py3-none-manylinux2014_x86_64.whl", hash = "sha256:e979f207eb8342da419acf0b0f555ad6c05711505064b660de216737c6c6f1fa", size = 84570573, upload-time = "2025-01-03T06:50:41.362Z" },
-    { url = "https://files.pythonhosted.org/packages/78/fd/8e423840da33a2973f30782d63be56c1633c6425907f37bb8e2740d72be1/warp_lang-1.5.1-py3-none-win_amd64.whl", hash = "sha256:5ccec622fb3f75d66c7507823970b2609067260cc6f6b5c3181288fd2a1d349c", size = 69988499, upload-time = "2025-01-03T06:50:52.546Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/aa/53557e8a0b23c24e2eb0c5b5ebac0b05d4df1062c8145773ba547561d9bf/warp_lang-1.10.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:0c6f44d4136cfc86316f5d35883a863b4dca2bc318331597e755ea872db0cd97", size = 23920846, upload-time = "2025-12-01T13:08:46.23Z" },
+    { url = "https://files.pythonhosted.org/packages/ea/85/22c1e2ed47daec6dd40eaf0b11c6b86ad483636b8038453a87d1031f8a36/warp_lang-1.10.1-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:2884b642f16b07b930b3605193c1b97d183eef80c5b0083d3a17473aee92138e", size = 132602920, upload-time = "2025-12-01T13:09:51.104Z" },
+    { url = "https://files.pythonhosted.org/packages/39/e0/d26537cd7a76a2edf6cad046b67d15b79f7d372994d0881019327200f4ee/warp_lang-1.10.1-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:7c8f839a01042677d1f417d31abe9304f9319fca7041c2ed82937ed511eb2362", size = 135364079, upload-time = "2025-12-01T13:10:34.534Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/0b/7d0db8dce470c9da9ffe5d2e55975325eb20ac2ebd52f63dee4b82302195/warp_lang-1.10.1-py3-none-win_amd64.whl", hash = "sha256:7addd14a913b50c406ba3b1abebf3a208d01591a1c382da799cff2806d234c5a", size = 114929196, upload-time = "2025-12-01T13:11:21.057Z" },
 ]
 
 [[package]]
