@@ -25,6 +25,31 @@ class WarblerSceneProperties(PropertyGroup):
         description="Enable links between objects in the simulation",
         default=False,
     )
+    spring_ke: FloatProperty(  # type: ignore
+        name="Spring Stiffness",
+        description="Stiffness constant for springs in the simulation",
+        default=1.0e5,
+    )
+    spring_kd: FloatProperty(  # type: ignore
+        name="Spring Damping",
+        description="Damping constant for springs in the simulation",
+        default=250.0,
+    )
+    spring_kf: FloatProperty(  # type: ignore
+        name="Spring Friction",
+        description="Friction constant for springs in the simulation",
+        default=500.0,
+    )
+    scale: FloatProperty(  # type: ignore
+        name="Simulation Scale",
+        description="Scale factor for the simulation, scaling all distances and sizes",
+        default=1.0,
+    )
+    particle_radius: FloatProperty(  # type: ignore
+        name="Particle Radius",
+        description="Radius of the particles in the simulation",
+        default=0.1,
+    )
 
 
 class WarblerObjectProperties(PropertyGroup):

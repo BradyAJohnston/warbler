@@ -15,7 +15,20 @@ class WB_PT_WarblerPanel(Panel):
         obj = context.active_object
         if obj is None:
             return
-        layout.prop(obj.wb, "rigid_shape")
+
+        def prop(name: str):
+            layout.prop(context.scene.wb, name)
+
+        prop("simulation_substeps")
+        prop("simulation_links")
+        prop("spring_ke")
+        prop("spring_kd")
+        prop("spring_kf")
+        prop("scale")
+        prop("particle_radius")
+
+        layout.separator()
+        layout.label(text="Active Object Settings")
         layout.prop(obj.wb, "rigid_is_active")
 
 

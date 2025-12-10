@@ -4,9 +4,46 @@ import newton
 import numpy as np
 import databpy as db
 from .utils import smooth_lerp, blender_to_quat, quat_to_blender
+from .props import WarblerSceneProperties
 
 
 class Simulation:
+    @property
+    def scene(self) -> bpy.types.Scene:
+        return bpy.context.scene
+
+    @property
+    def props(self) -> WarblerSceneProperties:
+        return self.scene.wb
+
+    @property
+    def fps(self) -> int:
+        return self.scene.render.fps
+
+    @property
+    def frame_dt(self) -> float:
+        return 1 / self.fps
+
+    @property
+    def ke(self) -> float:
+        return self.scene.wb.spring_ke
+
+    @property
+    def kd(self) -> float:
+        return self.scene.wb.spring_kd
+
+    @property
+    def kf(self) -> float:
+        return self.scene.wb.spring_kf
+
+    @property
+    def scale(self) -> float:
+        return self.scene.wb.scale
+
+    @property
+    def particle_radius(self) -> float:
+        return self.scene.wb.particle_radius
+
     def __init__(
         self,
         num_particles: int,
@@ -19,15 +56,8 @@ class Simulation:
     ):
         # Initialize simulation parameters
         self.num_particles: int = num_particles
-        self.radius: float = 0.1
-        self.scale: float = 1.0
         self.objects: list = objects
         self.clock: int = 0
-        self.fps: int = bpy.context.scene.render.fps
-        self.frame_dt: float = 1 / self.fps
-        self.ke: float = 1.0e5
-        self.kd: float = 250.0
-        self.kf: float = 500.0
         self.bob: db.BlenderObject | None = None
 
         # Create builder for simulation
@@ -43,7 +73,7 @@ class Simulation:
             up_axis = newton.Axis.Z
 
         builder = newton.ModelBuilder(up_axis=up_axis)
-        builder.default_particle_radius = self.radius
+        builder.default_particle_radius = self.particle_radius
 
         n_x = int(num_particles ** (1 / 3))
         n_y = int(num_particles ** (1 / 3))
@@ -106,8 +136,8 @@ class Simulation:
             rot=wp.quat_identity(),  # type: ignore
             vel=wp.vec3(*ivelocity),  # type: ignore
             mass=1,
-            jitter=self.radius * 0.1,
-            radius_mean=self.radius,
+            jitter=self.particle_radius * 0.1,
+            radius_mean=self.particle_radius,
         )
 
         self.num_particles = n_x * n_y * n_z
@@ -225,7 +255,7 @@ class Simulation:
             )
 
         self.particle_obj.store_named_attribute(
-            np.repeat(self.radius, self.num_particles), "radius"
+            np.repeat(self.particle_radius, self.num_particles), "radius"
         )
 
     @property
@@ -240,7 +270,9 @@ class Simulation:
         self.state_0.clear_forces()
         # self.state_1.clear_forces()
         if self.model.particle_grid is not None:
-            self.model.particle_grid.build(self.state_0.particle_q, self.radius * 2)  # type: ignore
+            self.model.particle_grid.build(
+                self.state_0.particle_q, self.particle_radius * 2
+            )  # type: ignore
 
         # Store positions and rotations of manually controlled bodies before solving
         manual_body_transforms = {}
