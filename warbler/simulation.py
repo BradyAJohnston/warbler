@@ -26,23 +26,23 @@ class Simulation:
 
     @property
     def ke(self) -> float:
-        return self.scene.wb.spring_ke
+        return self.props.spring_ke
 
     @property
     def kd(self) -> float:
-        return self.scene.wb.spring_kd
+        return self.props.spring_kd
 
     @property
     def kf(self) -> float:
-        return self.scene.wb.spring_kf
+        return self.props.spring_kf
 
     @property
     def scale(self) -> float:
-        return self.scene.wb.scale
+        return self.props.scale
 
     @property
     def particle_radius(self) -> float:
-        return self.scene.wb.particle_radius
+        return self.props.particle_radius
 
     def __init__(
         self,
