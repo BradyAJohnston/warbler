@@ -8,6 +8,16 @@ from .props import WarblerSceneProperties
 
 
 class Simulation:
+    """Physics simulation integrating Newton Physics with Blender.
+
+    Follows Newton's architecture pattern:
+    ModelBuilder → Model → State → Solver → Updated State
+    """
+
+    # ============================================================================
+    # Scene Properties (read from Blender)
+    # ============================================================================
+
     @property
     def scene(self) -> bpy.types.Scene:
         return bpy.context.scene
@@ -44,6 +54,10 @@ class Simulation:
     def particle_radius(self) -> float:
         return self.props.particle_radius
 
+    # ============================================================================
+    # Initialization
+    # ============================================================================
+
     def __init__(
         self,
         num_particles: int,
@@ -54,66 +68,105 @@ class Simulation:
         ivelocity=(0, 0, 10),
         add_ground: bool = True,
     ):
-        # Initialize simulation parameters
+        """Initialize simulation with specified parameters.
+
+        Args:
+            num_particles: Number of particles (will be cubed)
+            substeps: Number of solver iterations per timestep
+            links: Whether to add springs between particles
+            objects: Blender objects to include as rigid bodies
+            up_vector: World up direction
+            ivelocity: Initial particle velocity
+            add_ground: Whether to add ground plane
+        """
+        # Store configuration
         self.num_particles: int = num_particles
         self.objects: list = objects
         self.clock: int = 0
         self.bob: db.BlenderObject | None = None
 
-        # Create builder for simulation
-        # Convert up_vector to up_axis enum
-        if up_vector == (0, 0, 1):
-            up_axis = newton.Axis.Z
-        elif up_vector == (0, 1, 0):
-            up_axis = newton.Axis.Y
-        elif up_vector == (1, 0, 0):
-            up_axis = newton.Axis.X
-        else:
-            # Default to Z if non-standard
-            up_axis = newton.Axis.Z
+        # Build model (ModelBuilder phase)
+        builder = self._create_model_builder(up_vector)
+        self._add_rigid_bodies(builder, objects)
+        if add_ground:
+            builder.add_ground_plane()
+        self._add_particle_grid(builder, num_particles, ivelocity)
+        if links:
+            self._add_particle_links(builder)
+
+        # Finalize model (Model phase)
+        self.model = builder.finalize(device="cuda", requires_grad=False)
+
+        # Create simulation state (State phase)
+        self.state_0: newton.State = self.model.state()
+        self.state_1: newton.State = self.model.state()
+
+        # Create solver (Solver phase)
+        self.solver = newton.solvers.SolverXPBD(
+            model=self.model,
+            iterations=substeps,
+        )
+
+        # Create control
+        self.control = self.model.control()
+
+        # Create visualization
+        self.create_pointcloud()
+
+    # ============================================================================
+    # Model Building (ModelBuilder → Model)
+    # ============================================================================
+
+    def _create_model_builder(self, up_vector: tuple) -> newton.ModelBuilder:
+        """Create and configure ModelBuilder with up axis and particle settings."""
+        # Convert up_vector to Newton axis enum
+        axis_map = {
+            (0, 0, 1): newton.Axis.Z,
+            (0, 1, 0): newton.Axis.Y,
+            (1, 0, 0): newton.Axis.X,
+        }
+        up_axis = axis_map.get(up_vector, newton.Axis.Z)
 
         builder = newton.ModelBuilder(up_axis=up_axis)
         builder.default_particle_radius = self.particle_radius
+        return builder
 
-        n_x = int(num_particles ** (1 / 3))
-        n_y = int(num_particles ** (1 / 3))
-        n_z = int(num_particles ** (1 / 3))
-
+    def _add_rigid_bodies(
+        self, builder: newton.ModelBuilder, objects: list[bpy.types.Object]
+    ):
+        """Add Blender objects as rigid bodies to the model."""
         for obj in objects:
-            # obj = bob.object
-            # Set rotation mode to quaternion for consistent handling
             obj.rotation_mode = "QUATERNION"
 
-            # Create body with initial transform from Blender object
+            # Create body with transform from Blender
             initial_transform = wp.transform(
                 wp.vec3(*obj.location),
                 wp.quat(*blender_to_quat(obj.rotation_quaternion)),
             )
+            body = builder.add_body(mass=1e5, xform=initial_transform)
 
-            b = builder.add_body(
-                mass=1e5,
-                xform=initial_transform,
-            )
+            # Valid ShapeConfig parameters (from newton.ModelBuilder.ShapeConfig signature)
+            # Note: rolling_friction and torsional_friction are not ShapeConfig parameters
+            props = [
+                "density",
+                "ka",
+                "kd",
+                "ke",
+                "kf",
+                "mu",
+                "restitution",
+                "thickness",
+            ]
 
+            # Source properties from Blender object and pass to ShapeConfig
             if obj.wb.rigid_shape == "CUBE":  # type: ignore
-                # Create shape configuration with material properties
-                shape_cfg = newton.ModelBuilder.ShapeConfig(
-                    ke=self.ke,
-                    kd=self.kd,
-                    kf=self.kf,
-                    ka=0.1,
-                    mu=1.0,
-                    restitution=100,
-                )
+                prop_dict = {p: getattr(obj.wb, f"rigid_{p}") for p in props}  # type: ignore
+                shape_cfg = newton.ModelBuilder.ShapeConfig(**prop_dict)
 
-                # Use object dimensions (which includes scale) for half-extents
-                # obj.dimensions gives actual size in world space
                 obj.wb.rigid_body_index = builder.add_shape_box(  # type: ignore
-                    body=b,
-                    xform=wp.transform(
-                        wp.vec3(0, 0, 0), wp.quat_identity()
-                    ),  # Shape centered on body
-                    hx=obj.dimensions[0] / 2.0,  # Half-extents
+                    body=body,
+                    xform=wp.transform(wp.vec3(0, 0, 0), wp.quat_identity()),
+                    hx=obj.dimensions[0] / 2.0,
                     hy=obj.dimensions[1] / 2.0,
                     hz=obj.dimensions[2] / 2.0,
                     cfg=shape_cfg,
@@ -121,9 +174,15 @@ class Simulation:
             else:
                 print(Warning(f"Unsupported shape {obj.wb.rigid_shape}"))  # type: ignore
 
-        # Add ground plane if requested
-        if add_ground:
-            builder.add_ground_plane()
+    def _add_particle_grid(
+        self,
+        builder: newton.ModelBuilder,
+        num_particles: int,
+        ivelocity: tuple,
+    ):
+        """Add particle grid to the model."""
+        # Calculate grid dimensions
+        n_x = n_y = n_z = int(num_particles ** (1 / 3))
 
         builder.add_particle_grid(
             dim_x=n_x,
@@ -140,101 +199,170 @@ class Simulation:
             radius_mean=self.particle_radius,
         )
 
+        # Update actual particle count
         self.num_particles = n_x * n_y * n_z
-        self.edges = []
-        if links:
-            self.edges = np.zeros((self.num_particles, 2), int)
-            for i in range(self.num_particles):
-                self.edges[i, :] = (i - 1, i)
-                builder.add_spring(i - 1, i, 3, 0.0, 0)
 
-        # Finalize and build the model
-        self.model = builder.finalize(device="cuda", requires_grad=False)
+    def _add_particle_links(self, builder: newton.ModelBuilder):
+        """Add spring constraints between consecutive particles."""
+        self.edges = np.zeros((self.num_particles, 2), int)
+        for i in range(self.num_particles):
+            self.edges[i, :] = (i - 1, i)
+            builder.add_spring(i - 1, i, 3, 0.0, 0)
 
-        # Create states
-        self.state_0: newton.State = self.model.state()
-        self.state_1: newton.State = self.model.state()
-        self._state_initial = self.model.state()
+    # ============================================================================
+    # Blender ↔ Simulation Synchronization
+    # ============================================================================
 
-        # Create solver
-        self.solver = newton.solvers.SolverXPBD(
-            model=self.model,
-            iterations=substeps,
-        )
-
-        # Create control object
-        self.control = self.model.control()
-
-        # Create mesh object for visualization
-        self.create_particle_mesh()
-
-    def set_obj_from_simulation(self):
+    def _update_blender_from_simulation(self):
+        """Copy physics-controlled body transforms from simulation to Blender."""
         if self.state_0.body_q is None:
-            return None
-        self.rigid_transforms = self.state_0.body_q.numpy()
+            return
+
+        rigid_transforms = self.state_0.body_q.numpy()
         for i, obj in enumerate(self.objects):
-            if not obj.wb.rigid_is_active:
-                continue
-            obj.location = self.rigid_transforms[i, 0:3]
-            obj.rotation_quaternion = quat_to_blender(self.rigid_transforms[i, 3:7])
+            if obj.wb.rigid_is_active:
+                obj.location = rigid_transforms[i, 0:3]
+                obj.rotation_quaternion = quat_to_blender(rigid_transforms[i, 3:7])
 
-    def set_simulation_from_obj(self, decay_frames=5):
-        new_transforms = []
+    def _update_simulation_from_blender(self):
+        """Copy manually-controlled body transforms from Blender to simulation."""
         if self.state_0.body_q is None:
-            return None
+            return
+
         current_sim_transforms = self.state_0.body_q.numpy()
-
-        if self.state_0.body_q is None:
-            return None
-
-        # Get body velocities for manually controlled bodies
         body_velocities = None
         if hasattr(self.state_0, "body_qd") and self.state_0.body_qd is not None:
             body_velocities = self.state_0.body_qd.numpy()
 
+        new_transforms = []
         for i, obj in enumerate(self.objects):
             obj.rotation_mode = "QUATERNION"
-            loc_in_sim = current_sim_transforms[i, 0:3]
-            rot_in_sim = current_sim_transforms[i, 3:7]
 
             if not obj.wb.rigid_is_active:
-                # Manually controlled body - set position from Blender with smoothing
-                rot = blender_to_quat(obj.rotation_quaternion)
-                loc = np.array(obj.location)
-
-                # Apply smoothing to position (except first frame)
-                if self.clock != 0:
-                    loc = smooth_lerp(
-                        loc_in_sim,
-                        loc,
-                        bpy.context.scene.wb.rigid_decay_frames,  # type: ignore
-                    )
-
-                    # Calculate velocity from smoothed position change for particle interaction
-                    # This velocity will be used during collision resolution to push particles
-                    # but will be zeroed after the solve to prevent the body from moving
-                    if body_velocities is not None:
-                        velocity = (loc - loc_in_sim) / self.frame_dt
-                        body_velocities[i, 0:3] = velocity  # Linear velocity
-                        # Angular velocity remains zero
-
-                trans = wp.transform(wp.vec3(*loc), wp.quat(*rot))
+                transform = self._get_manual_body_transform(
+                    obj, current_sim_transforms[i], body_velocities, i
+                )
             else:
-                # Physics-controlled body - use simulation position
-                trans = wp.transform(
-                    wp.vec3(*loc_in_sim),
-                    wp.quat(*rot_in_sim),
+                transform = wp.transform(
+                    wp.vec3(*current_sim_transforms[i, 0:3]),
+                    wp.quat(*current_sim_transforms[i, 3:7]),
                 )
 
-            new_transforms.append(trans)
+            new_transforms.append(transform)
 
         self.state_0.body_q.assign(new_transforms)
-
-        # Update body velocities if they were modified
         if body_velocities is not None:
             self.state_0.body_qd.assign(body_velocities)
 
-    def create_particle_mesh(self):
+    def _get_manual_body_transform(
+        self,
+        obj: bpy.types.Object,
+        current_sim_transform: np.ndarray,
+        body_velocities: np.ndarray | None,
+        body_index: int,
+    ) -> wp.transform:
+        """Calculate transform for manually-controlled body with smoothing.
+
+        Manually-controlled bodies follow Blender positions but are smoothed
+        to avoid jarring movements. Their velocity is calculated to push particles
+        but then zeroed to prevent self-movement.
+        """
+        rot = blender_to_quat(obj.rotation_quaternion)
+        loc = np.array(obj.location)
+
+        # Apply smoothing (except first frame)
+        if self.clock != 0:
+            loc = smooth_lerp(
+                current_sim_transform[0:3],
+                loc,
+                self.props.rigid_decay_frames,
+            )
+
+            # Calculate velocity for particle interaction
+            if body_velocities is not None:
+                velocity = (loc - current_sim_transform[0:3]) / self.frame_dt
+                body_velocities[body_index, 0:3] = velocity
+
+        return wp.transform(wp.vec3(*loc), wp.quat(*rot))
+
+    # ============================================================================
+    # State Accessors
+    # ============================================================================
+
+    @property
+    def particle_positions(self) -> np.ndarray:
+        """Get current particle positions from simulation state."""
+        return self.state_0.particle_q.numpy()  # type: ignore
+
+    @property
+    def velocity(self) -> np.ndarray:
+        """Get current particle velocities from simulation state."""
+        return self.state_0.particle_qd.numpy()  # type: ignore
+
+    # ============================================================================
+    # Physics Simulation (State → Solver → Updated State)
+    # ============================================================================
+
+    def simulate(self):
+        """Execute one physics timestep following Newton's pattern:
+        State → Solver → Updated State
+        """
+        # Prepare state for simulation
+        self.state_0.clear_forces()
+        if self.model.particle_grid is not None:
+            self.model.particle_grid.build(
+                self.state_0.particle_q, self.particle_radius * 2
+            )  # type: ignore
+
+        # Store manual body transforms before solving
+        manual_body_transforms = self._get_manual_body_transforms()
+
+        # Run solver (State → Solver → Updated State)
+        contacts = self.model.collide(self.state_0)
+        self.solver.step(
+            self.state_0, self.state_1, self.control, contacts, self.frame_dt
+        )
+
+        # Restore manual bodies (kinematic constraint)
+        self._restore_manual_body_transforms(manual_body_transforms)
+
+        # Swap double-buffered states
+        self.state_0, self.state_1 = self.state_1, self.state_0
+
+    def _get_manual_body_transforms(self) -> dict[int, np.ndarray]:
+        """Get transforms of manually-controlled bodies before physics solve."""
+        manual_transforms = {}
+        if self.state_0.body_q is not None:
+            current_transforms = self.state_0.body_q.numpy()
+            for i, obj in enumerate(self.objects):
+                if not obj.wb.rigid_is_active:
+                    manual_transforms[i] = current_transforms[i].copy()
+        return manual_transforms
+
+    def _restore_manual_body_transforms(self, manual_transforms: dict[int, np.ndarray]):
+        """Restore manually-controlled bodies to fixed positions (kinematic behavior)."""
+        if not manual_transforms or self.state_1.body_q is None:
+            return
+
+        # Restore positions
+        solved_transforms = self.state_1.body_q.numpy()
+        for i, transform in manual_transforms.items():
+            solved_transforms[i] = transform
+        self.state_1.body_q.assign(solved_transforms)
+
+        # Zero velocities to prevent movement
+        if hasattr(self.state_1, "body_qd") and self.state_1.body_qd is not None:
+            body_velocities = self.state_1.body_qd.numpy()
+            for i in manual_transforms.keys():
+                body_velocities[i] = 0.0
+            self.state_1.body_qd.assign(body_velocities)
+
+    # ============================================================================
+    # Visualization
+    # ============================================================================
+
+    def create_pointcloud(self):
+        """Create or update Blender mesh for particle visualization."""
         name = "ParticleObject"
         try:
             bob = db.BlenderObjectAttribute(bpy.data.objects[name])
@@ -243,7 +371,6 @@ class Simulation:
                 self.particle_object = db.BlenderObject.from_pointcloud(
                     self.particle_positions
                 )
-
         except KeyError:
             self.particle_object = db.BlenderObject.from_pointcloud(
                 self.particle_positions
@@ -253,68 +380,25 @@ class Simulation:
             self.particle_radius, len(self.particle_object)
         )
 
-    @property
-    def particle_positions(self) -> np.ndarray:
-        return self.state_0.particle_q.numpy()  # type: ignore
-
-    @property
-    def velocity(self) -> np.ndarray:
-        return self.state_0.particle_qd.numpy()  # type: ignore
-
-    def simulate(self):
-        self.state_0.clear_forces()
-        # self.state_1.clear_forces()
-        if self.model.particle_grid is not None:
-            self.model.particle_grid.build(
-                self.state_0.particle_q, self.particle_radius * 2
-            )  # type: ignore
-
-        # Store positions and rotations of manually controlled bodies before solving
-        manual_body_transforms = {}
-        if self.state_0.body_q is not None:
-            current_transforms = self.state_0.body_q.numpy()
-            for i, obj in enumerate(self.objects):
-                if not obj.wb.rigid_is_active:
-                    # Store the transform we want to keep
-                    manual_body_transforms[i] = current_transforms[i].copy()
-
-        contacts = self.model.collide(self.state_0)
-        self.solver.step(
-            self.state_0, self.state_1, self.control, contacts, self.frame_dt
-        )
-
-        # Restore manually controlled bodies to their intended positions (make them kinematic)
-        if manual_body_transforms and self.state_1.body_q is not None:
-            solved_transforms = self.state_1.body_q.numpy()
-            for i, transform in manual_body_transforms.items():
-                # Restore the position/rotation we set (ignore solver's changes)
-                solved_transforms[i] = transform
-            self.state_1.body_q.assign(solved_transforms)
-
-            # Set their velocities to zero to prevent internal bouncing
-            if hasattr(self.state_1, "body_qd") and self.state_1.body_qd is not None:
-                body_velocities = self.state_1.body_qd.numpy()
-                for i in manual_body_transforms.keys():
-                    body_velocities[i] = 0.0  # Zero out all velocity components
-                self.state_1.body_qd.assign(body_velocities)
-
-        # swap states
-        (self.state_0, self.state_1) = (self.state_1, self.state_0)
-
-    def object_as_wp_transform(self, obj: bpy.types.Object):
-        return wp.transform(
-            wp.vec3(obj.location), wp.quat(*blender_to_quat(obj.rotation_quaternion))
-        )
-
-    def step(self):
-        # get the blender object the user is interacting with and extract
-        # the transformations from it
-
-        self.set_simulation_from_obj()
-        self.simulate()
-        self.set_obj_from_simulation()
-
-        # Update particle mesh
+    def _update_particle_visualization(self):
+        """Update particle mesh with current simulation state."""
         self.particle_object.position = self.particle_positions
         self.particle_object.store_named_attribute(self.velocity, "velocity")
+
+    # ============================================================================
+    # Main Simulation Loop
+    # ============================================================================
+
+    def step(self):
+        """Execute one complete simulation step.
+
+        Called whenever the Blender scene frame will change.
+
+        Flow: Blender → Simulation → Solve → Blender
+        """
+        self._update_simulation_from_blender()
+        self.simulate()
+        self._update_blender_from_simulation()
+        self._update_particle_visualization()
+
         self.clock += 1

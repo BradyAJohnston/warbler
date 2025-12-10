@@ -82,6 +82,46 @@ class WarblerObjectProperties(PropertyGroup):
         ],
         default="CUBE",
     )
+    rigid_density: FloatProperty(  # type: ignore
+        name="Density",
+        description="Density of the rigid body, used to compute mass from volume",
+        default=1000.0,
+    )
+    rigid_ka: FloatProperty(  # type: ignore
+        name="Contact Adhesion",
+        description="Adhesion constant for contacts involving this rigid body",
+        default=0.0,
+    )
+    rigid_kd: FloatProperty(  # type: ignore
+        name="Contact Damping",
+        description="Damping constant for contacts involving this rigid body",
+        default=1000.0,
+    )
+    rigid_ke: FloatProperty(  # type: ignore
+        name="Contact Elasticity",
+        description="Elasticity constant for contacts involving this rigid body",
+        default=1.0e5,
+    )
+    rigid_kf: FloatProperty(  # type: ignore
+        name="Friction damping",
+        description="The friction damping coefficient. Used by SemiImplcit, Feathertone",
+        default=500.0,
+    )
+    rigid_mu: FloatProperty(  # type: ignore
+        name="Friction Coefficient",
+        description="Coulomb friction coefficient for contacts, used by all solvers",
+        default=0.5,
+    )
+    rigid_restitution: FloatProperty(  # type: ignore
+        name="Restitution Coefficient",
+        description="Restitution (bounciness) coefficient for contacts, used by XPBD",
+        default=0.0,
+    )
+    rigid_thickness: FloatProperty(  # type: ignore
+        name="Collision Thickness",
+        description="The thickness of the shape used for collision detection",
+        default=1e-5,
+    )
 
 
 CLASSES = [WarblerObjectProperties, WarblerSceneProperties]
