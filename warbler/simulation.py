@@ -237,25 +237,20 @@ class Simulation:
     def create_particle_mesh(self):
         name = "ParticleObject"
         try:
-            obj = bpy.data.objects[name]
-            if len(obj.data.vertices) != self.num_particles:  # type: ignore
-                bpy.data.objects.remove(obj)
-                obj = db.create_object(
-                    self.particle_positions, edges=self.edges, name=name
+            bob = db.BlenderObjectAttribute(bpy.data.objects[name])
+            if len(bob) != self.num_particles:
+                bpy.data.objects.remove(bob.obj, unlink=True)
+                self.particle_object = db.BlenderObject.from_pointcloud(
+                    self.particle_positions
                 )
 
-            self.particle_obj = db.BlenderObject(obj)
-
-            self.particle_obj.position = self.particle_positions
         except KeyError:
-            self.particle_obj = db.create_bob(
-                self.particle_positions,
-                edges=self.edges,  # type: ignore
-                name=name,
+            self.particle_object = db.BlenderObject.from_pointcloud(
+                self.particle_positions
             )
 
-        self.particle_obj.store_named_attribute(
-            np.repeat(self.particle_radius, self.num_particles), "radius"
+        self.particle_object["radius"] = np.repeat(
+            self.particle_radius, len(self.particle_object)
         )
 
     @property
@@ -320,6 +315,6 @@ class Simulation:
         self.set_obj_from_simulation()
 
         # Update particle mesh
-        self.particle_obj.position = self.particle_positions
-        self.particle_obj.store_named_attribute(self.velocity, "velocity")
+        self.particle_object.position = self.particle_positions
+        self.particle_object.store_named_attribute(self.velocity, "velocity")
         self.clock += 1

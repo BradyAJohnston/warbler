@@ -1,4 +1,5 @@
 from bpy.types import Panel
+from bpy.types import UILayout
 
 
 class WB_PT_WarblerPanel(Panel):
@@ -8,13 +9,16 @@ class WB_PT_WarblerPanel(Panel):
     bl_region_type = "UI"
 
     def draw(self, context):
-        layout = self.layout
+        layout: UILayout = self.layout
+        assert layout is not None and context is not None
         layout.operator("wb.start_simulation")
         layout.label(text="Simulation Settings")
         layout.prop(context.scene.wb, "rigid_decay_frames")
         obj = context.active_object
         if obj is None:
             return
+
+        layout.prop(context.scene.render, "fps")
 
         def prop(name: str):
             layout.prop(context.scene.wb, name)

@@ -6,7 +6,7 @@ tagline = "Interactive GPU simulations"
 maintainer = "Brady Johnston <brady.johnston@me.com>"
 type = "add-on"
 website = "https://bradyajohnston.github.io/warbler"
-blender_version_min = "4.2.0"
+blender_version_min = "4.5.0"
 platforms = [
 	"linux-x64",
 ]
