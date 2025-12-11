@@ -4,7 +4,7 @@ import newton
 import numpy as np
 import databpy as db
 from .utils import smooth_lerp, blender_to_quat, quat_to_blender
-from .props import WarblerSceneProperties
+from .props import WarblerSceneProperties, WarblerObjectProperties
 
 
 class Simulation:
@@ -147,20 +147,16 @@ class Simulation:
 
             # Valid ShapeConfig parameters (from newton.ModelBuilder.ShapeConfig signature)
             # Note: rolling_friction and torsional_friction are not ShapeConfig parameters
-            props = [
-                "density",
-                "ka",
-                "kd",
-                "ke",
-                "kf",
-                "mu",
-                "restitution",
-                "thickness",
+
+            props: list[str] = [
+                x for x in dir(WarblerObjectProperties) if x.startswith("rigid_")
             ]
 
             # Source properties from Blender object and pass to ShapeConfig
             if obj.wb.rigid_shape == "CUBE":  # type: ignore
-                prop_dict = {p: getattr(obj.wb, f"rigid_{p}") for p in props}  # type: ignore
+                prop_dict = {
+                    name.replace("rigid_", ""): getattr(obj.wb, name) for name in props
+                }  # type: ignore
                 shape_cfg = newton.ModelBuilder.ShapeConfig(**prop_dict)
 
                 obj.wb.rigid_body_index = builder.add_shape_box(  # type: ignore
