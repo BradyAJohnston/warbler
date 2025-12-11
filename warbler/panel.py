@@ -30,6 +30,7 @@ class WB_PT_WarblerPanel(Panel):
         prop("spring_kf")
         prop("scale")
         prop("particle_radius")
+        prop(name="particle_source")
 
         layout.separator()
         layout.label(text="Active Object Settings")

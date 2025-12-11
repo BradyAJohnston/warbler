@@ -1,3 +1,4 @@
+from .geometryset import GeometrySet
 import bpy
 import warp as wp
 import newton
@@ -24,7 +25,7 @@ class Simulation:
 
     @property
     def props(self) -> WarblerSceneProperties:
-        return self.scene.wb
+        return self.scene.wb  # type: ignore
 
     @property
     def fps(self) -> int:
@@ -62,11 +63,11 @@ class Simulation:
         self,
         num_particles: int,
         substeps: int = 5,
-        links: bool = False,
         objects: list[bpy.types.Object] = [],
         up_vector=(0, 0, 1),
         ivelocity=(0, 0, 10),
         add_ground: bool = True,
+        particle_object: bpy.types.Object | None = None,
     ):
         """Initialize simulation with specified parameters.
 
@@ -82,20 +83,32 @@ class Simulation:
         # Store configuration
         self.num_particles: int = num_particles
         self.objects: list = objects
+        self.builder: newton.ModelBuilder = self._create_model_builder(up_vector)
         self.clock: int = 0
         self.bob: db.BlenderObject | None = None
 
-        # Build model (ModelBuilder phase)
-        builder = self._create_model_builder(up_vector)
-        self._add_rigid_bodies(builder, objects)
+        self._add_rigid_bodies(objects)
         if add_ground:
-            builder.add_ground_plane()
-        self._add_particle_grid(builder, num_particles, ivelocity)
-        if links:
-            self._add_particle_links(builder)
+            self.builder.add_ground_plane()
+
+        if particle_object is not None:
+            geo = GeometrySet(particle_object)
+            pc = geo.geom.pointcloud
+            if pc is None:
+                pass
+
+            props = {
+                name: db.Attribute(pc.attributes[name]).as_array()
+                for name in ["position", "velocity", "mass", "radius"]
+                if name in pc.attributes
+            }
+            self._add_particles(**props)
+        else:
+            positions = np.random.random((num_particles, 3))
+            self._add_particles(positions)
 
         # Finalize model (Model phase)
-        self.model = builder.finalize(device="cuda", requires_grad=False)
+        self.model = self.builder.finalize(device="cuda")
 
         # Create simulation state (State phase)
         self.state_0: newton.State = self.model.state()
@@ -109,8 +122,6 @@ class Simulation:
 
         # Create control
         self.control = self.model.control()
-
-        # Create visualization
         self.create_pointcloud()
 
     # ============================================================================
@@ -131,9 +142,7 @@ class Simulation:
         builder.default_particle_radius = self.particle_radius
         return builder
 
-    def _add_rigid_bodies(
-        self, builder: newton.ModelBuilder, objects: list[bpy.types.Object]
-    ):
+    def _add_rigid_bodies(self, objects: list[bpy.types.Object]):
         """Add Blender objects as rigid bodies to the model."""
         for obj in objects:
             obj.rotation_mode = "QUATERNION"
@@ -143,7 +152,7 @@ class Simulation:
                 wp.vec3(*obj.location),
                 wp.quat(*blender_to_quat(obj.rotation_quaternion)),
             )
-            body = builder.add_body(mass=1e5, xform=initial_transform)
+            body = self.builder.add_body(mass=1e5, xform=initial_transform)
 
             # Valid ShapeConfig parameters (from newton.ModelBuilder.ShapeConfig signature)
             # Note: rolling_friction and torsional_friction are not ShapeConfig parameters
@@ -159,9 +168,9 @@ class Simulation:
                 }  # type: ignore
                 shape_cfg = newton.ModelBuilder.ShapeConfig(**prop_dict)
 
-                obj.wb.rigid_body_index = builder.add_shape_box(  # type: ignore
+                obj.wb.rigid_body_index = self.builder.add_shape_box(  # type: ignore
                     body=body,
-                    xform=wp.transform(wp.vec3(0, 0, 0), wp.quat_identity()),
+                    xform=wp.transform(wp.vec3(0, 0, 0), wp.quat_identity(float)),
                     hx=obj.dimensions[0] / 2.0,
                     hy=obj.dimensions[1] / 2.0,
                     hz=obj.dimensions[2] / 2.0,
@@ -170,9 +179,26 @@ class Simulation:
             else:
                 print(Warning(f"Unsupported shape {obj.wb.rigid_shape}"))  # type: ignore
 
+    def _add_particles(
+        self,
+        position: np.ndarray,
+        velocity: np.ndarray | None = None,
+        mass: np.ndarray | None = None,
+        radius: np.ndarray | None = None,
+    ) -> None:
+        self.particle_radii = radius
+
+        # for some reason we have to manually set the positions _again_ after intialising
+        # the particles themselves, might be a bug but can't look into it currently
+        self.builder.add_particles(
+            pos=position,  # type: ignore
+            vel=velocity,  # type: ignore
+            mass=mass,  # type: ignore
+            radius=radius,  # type: ignore
+        )
+
     def _add_particle_grid(
         self,
-        builder: newton.ModelBuilder,
         num_particles: int,
         ivelocity: tuple,
     ):
@@ -180,7 +206,7 @@ class Simulation:
         # Calculate grid dimensions
         n_x = n_y = n_z = int(num_particles ** (1 / 3))
 
-        builder.add_particle_grid(
+        self.builder.add_particle_grid(
             dim_x=n_x,
             dim_y=n_y,
             dim_z=n_z,
@@ -198,12 +224,12 @@ class Simulation:
         # Update actual particle count
         self.num_particles = n_x * n_y * n_z
 
-    def _add_particle_links(self, builder: newton.ModelBuilder):
+    def _add_springs(self):
         """Add spring constraints between consecutive particles."""
-        self.edges = np.zeros((self.num_particles, 2), int)
-        for i in range(self.num_particles):
-            self.edges[i, :] = (i - 1, i)
-            builder.add_spring(i - 1, i, 3, 0.0, 0)
+        pass
+        # for i in range(self.num_particles):
+        #     self.edges[i, :] = (i - 1, i)
+        #     self.builder.add_spring(i - 1, i, 3, 0.0, 0)
 
     # ============================================================================
     # Blender ↔ Simulation Synchronization
@@ -360,21 +386,13 @@ class Simulation:
     def create_pointcloud(self):
         """Create or update Blender mesh for particle visualization."""
         name = "ParticleObject"
-        try:
-            bob = db.BlenderObjectAttribute(bpy.data.objects[name])
-            if len(bob) != self.num_particles:
-                bpy.data.objects.remove(bob.obj, unlink=True)
-                self.particle_object = db.BlenderObject.from_pointcloud(
-                    self.particle_positions
-                )
-        except KeyError:
-            self.particle_object = db.BlenderObject.from_pointcloud(
-                self.particle_positions
-            )
 
-        self.particle_object["radius"] = np.repeat(
-            self.particle_radius, len(self.particle_object)
+        self.particle_object = db.BlenderObject.from_pointcloud(
+            self.particle_positions,
+            name=name,
         )
+
+        self.particle_object["radius"] = self.particle_radii
 
     def _update_particle_visualization(self):
         """Update particle mesh with current simulation state."""

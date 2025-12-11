@@ -1,6 +1,7 @@
 from bpy.types import Operator
 from .manager import SimulationManager
 from .simulation import Simulation
+import databpy as db
 from bpy.props import IntProperty, BoolProperty, FloatVectorProperty
 
 
@@ -31,11 +32,7 @@ class WB_OT_StartSimulation(Operator):
         description="Determins the orientation of the physics world, inputing the up vector for all calculations",
         default=[0, 0, 1],
     )
-    springs: BoolProperty(  # type: ignore
-        name="Springs",
-        description="Create springs between succesive points for linking together in the simulation",
-        default=False,
-    )
+
     add_ground: BoolProperty(  # type: ignore
         name="Add Ground Plane",
         description="Add a ground plane to the simulation for objects and particles to collide with",
@@ -48,15 +45,19 @@ class WB_OT_StartSimulation(Operator):
         return {"RUNNING_MODAL"}
 
     def execute(self, context):
-        manager: SimulationManager = context.scene.SimulationManager
+        scene = context.scene
+        assert scene is not None
+        manager: SimulationManager = scene.SimulationManager
         manager.simulation = Simulation(
             num_particles=self.n_particles,
             substeps=self.substeps,
-            links=self.springs,
             objects=[obj for obj in context.selected_objects],
             up_vector=self.upvector,
             ivelocity=self.velocity,
             add_ground=self.add_ground,
+            particle_object=scene.wb.particle_source
+            if not scene.wb.particle_source_evaluate
+            else db.evaluate_object(scene.wb.particle_source),
         )
         self.report({"INFO"}, "Simulation compiled on the GPU")
         return {"FINISHED"}

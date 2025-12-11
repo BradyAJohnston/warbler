@@ -1,10 +1,11 @@
-from bpy.types import PropertyGroup
+from bpy.types import PropertyGroup, Object
 from bpy.props import (
     EnumProperty,
     FloatProperty,
     IntProperty,
     StringProperty,
     BoolProperty,
+    PointerProperty,
 )
 
 
@@ -49,6 +50,16 @@ class WarblerSceneProperties(PropertyGroup):
         name="Particle Radius",
         description="Radius of the particles in the simulation",
         default=0.1,
+    )
+    particle_source: PointerProperty(  # type: ignore
+        type=Object,
+        name="Particle Source",
+        description="Source simulation particles from this object",
+    )
+    particle_source_evaluate: BoolProperty(  # type: ignore
+        name="Evaluate",
+        description="Evaluate the object and all modifiers first before sourcing the particles",
+        default=True,
     )
 
 
