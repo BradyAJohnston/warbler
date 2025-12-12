@@ -1,4 +1,5 @@
-from bpy.types import PropertyGroup, Object
+from bpy.types import PropertyGroup, Object, Context
+import bpy
 from bpy.props import (
     EnumProperty,
     FloatProperty,
@@ -9,7 +10,36 @@ from bpy.props import (
 )
 
 
+class SimulationListItem(bpy.types.PropertyGroup):
+    name: StringProperty(name="UUID")  # type: ignore
+    compute_time: FloatProperty(name="Time", default=0.0)  # type: ignore
+    is_active: BoolProperty(name="Active", default=True)  # type: ignore
+
+
+class WB_UL_SimulationList(bpy.types.UIList):
+    def draw_item(  # type: ignore
+        self,
+        context,
+        layout: bpy.types.UILayout,
+        data,
+        item: SimulationListItem,
+        icon,
+        active_data,
+        active_property,
+        *,
+        index=0,
+        flt_flag=0,
+    ):
+        layout: bpy.types.UILayout = layout
+
+        layout.label(text=item.name)
+
+        layout.prop(item, "is_active", text="")
+
+
 class WarblerSceneProperties(PropertyGroup):
+    manager_active_index: IntProperty()  # type: ignore
+
     rigid_decay_frames: IntProperty(  # type: ignore
         name="Rigid Input Smoothing",
         description="Number of frames to move the inputs of the rigid body over",
@@ -61,6 +91,13 @@ class WarblerSceneProperties(PropertyGroup):
         description="Evaluate the object and all modifiers first before sourcing the particles",
         default=True,
     )
+
+
+def scene_properties(context: Context | None) -> WarblerSceneProperties:
+    if context is None:
+        context = bpy.context
+
+    return context.scene.wb  # type: ignore
 
 
 class WarblerObjectProperties(PropertyGroup):
@@ -135,4 +172,9 @@ class WarblerObjectProperties(PropertyGroup):
     )
 
 
-CLASSES = [WarblerObjectProperties, WarblerSceneProperties]
+CLASSES = [
+    WarblerObjectProperties,
+    WarblerSceneProperties,
+    SimulationListItem,
+    WB_UL_SimulationList,
+]

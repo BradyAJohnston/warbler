@@ -1,7 +1,7 @@
-from bpy.types import Operator
-from .manager import SimulationManager
+from bpy.types import Operator, Context
+from .manager import SimulationManager, get_manager
 from .simulation import Simulation
-import databpy as db
+from . import props
 from bpy.props import IntProperty, BoolProperty, FloatVectorProperty
 
 
@@ -48,19 +48,38 @@ class WB_OT_StartSimulation(Operator):
         scene = context.scene
         assert scene is not None
         manager: SimulationManager = scene.SimulationManager
-        manager.simulation = Simulation(
-            num_particles=self.n_particles,
-            substeps=self.substeps,
-            objects=[obj for obj in context.selected_objects],
-            up_vector=self.upvector,
-            ivelocity=self.velocity,
-            add_ground=self.add_ground,
-            particle_object=scene.wb.particle_source
-            if not scene.wb.particle_source_evaluate
-            else db.evaluate_object(scene.wb.particle_source),
+        manager.add(
+            Simulation(
+                num_particles=self.n_particles,
+                substeps=self.substeps,
+                objects=[obj for obj in context.selected_objects],
+                up_vector=self.upvector,
+                ivelocity=self.velocity,
+                add_ground=self.add_ground,
+                particle_object=scene.wb.particle_source,
+            )
         )
         self.report({"INFO"}, "Simulation compiled on the GPU")
         return {"FINISHED"}
 
 
-CLASSES = [WB_OT_StartSimulation]
+class WB_OT_RemoveSimulation(Operator):
+    bl_idname = "wb.remove_simulation"
+    bl_label = "Remove Simulation"
+    bl_description = (
+        "Delete and remove a simulation from the list of those being computed"
+    )
+
+    def exectute(self, context: Context):
+        scene = context.scene
+        assert scene is not None
+
+        manager = get_manager(context)
+        wb = props.scene_properties(context)
+        manager.remove(wb.manager_active_index)
+        wb.manager_active_index = max(0, wb.manager_active_index - 1)
+
+        return {"FINISHED"}
+
+
+CLASSES = [WB_OT_StartSimulation, WB_OT_RemoveSimulation]

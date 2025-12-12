@@ -6,6 +6,11 @@ import numpy as np
 import databpy as db
 from .utils import smooth_lerp, blender_to_quat, quat_to_blender
 from .props import WarblerSceneProperties, WarblerObjectProperties
+from uuid import uuid1
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .manager import SimulationManager
 
 
 class Simulation:
@@ -55,6 +60,20 @@ class Simulation:
     def particle_radius(self) -> float:
         return self.props.particle_radius
 
+    @property
+    def uuid(self) -> str:
+        return self._uuid
+
+    @property
+    def manager(self) -> "SimulationManager":
+        if self._manager is None:
+            raise RuntimeError
+        return self._manager
+
+    @property
+    def is_active(self) -> bool:
+        return self.manager.sim_items[self.uuid].is_active
+
     # ============================================================================
     # Initialization
     # ============================================================================
@@ -86,6 +105,8 @@ class Simulation:
         self.builder: newton.ModelBuilder = self._create_model_builder(up_vector)
         self.clock: int = 0
         self.bob: db.BlenderObject | None = None
+        self._uuid: str = str(uuid1())
+        self._manager: SimulationManager | None = None
 
         self._add_rigid_bodies(objects)
         if add_ground:
@@ -93,16 +114,7 @@ class Simulation:
 
         if particle_object is not None:
             geo = GeometrySet(particle_object)
-            pc = geo.geom.pointcloud
-            if pc is None:
-                pass
-
-            props = {
-                name: db.Attribute(pc.attributes[name]).as_array()
-                for name in ["position", "velocity", "mass", "radius"]
-                if name in pc.attributes
-            }
-            self._add_particles(**props)
+            self._add_particles(**geo.pointcloud.to_props())
         else:
             positions = np.random.random((num_particles, 3))
             self._add_particles(positions)
@@ -188,8 +200,13 @@ class Simulation:
     ) -> None:
         self.particle_radii = radius
 
-        # for some reason we have to manually set the positions _again_ after intialising
-        # the particles themselves, might be a bug but can't look into it currently
+        if velocity is None:
+            velocity = np.zeros(position.shape, dtype=float)
+        if mass is None:
+            mass = np.repeat(1.0, position.shape[0])
+        if radius is None:
+            radius = np.repeat(0.1, position.shape[0])
+
         self.builder.add_particles(
             pos=position,  # type: ignore
             vel=velocity,  # type: ignore

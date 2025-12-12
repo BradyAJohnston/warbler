@@ -36,5 +36,20 @@ class WB_PT_WarblerPanel(Panel):
         layout.label(text="Active Object Settings")
         layout.prop(obj.wb, "rigid_is_active")
 
+        layout.template_list(
+            "WB_UL_SimulationList",
+            "A list",
+            context.scene,
+            "wb_sim_list",
+            context.scene.wb,
+            "manager_active_index",
+            rows=3,
+        )
+        layout.operator("wb.remove_simulation")
+        item = context.scene.wb_sim_items.get(context.scene.wb.manager_active_index)
+        if item is None:
+            return
+        layout.prop(item, "is_active")
+
 
 CLASSES = [WB_PT_WarblerPanel]
