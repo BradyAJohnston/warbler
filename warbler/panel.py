@@ -1,5 +1,6 @@
 from bpy.types import Panel
 from bpy.types import UILayout
+from .props import scene_properties
 
 
 class WB_PT_WarblerPanel(Panel):
@@ -46,7 +47,13 @@ class WB_PT_WarblerPanel(Panel):
             rows=3,
         )
         layout.operator("wb.remove_simulation")
-        item = context.scene.wb_sim_items.get(context.scene.wb.manager_active_index)
+        item_collection = context.scene.wb_sim_list
+        if len(item_collection) == 0:
+            return
+        try:
+            item = context.scene.wb_sim_list[context.scene.wb.manager_active_index]
+        except KeyError:
+            return
         if item is None:
             return
         layout.prop(item, "is_active")
