@@ -16,11 +16,8 @@ class WB_OT_AddSimulation(Operator):
         return {"RUNNING_MODAL"}
 
     def execute(self, context):
-        scene = context.scene
-        assert scene is not None
         man = get_manager(context)
         man.add(SimulatorXPBD())
-        self.report({"INFO"}, "Simulation compiled on the GPU")
         return {"FINISHED"}
 
 
@@ -47,14 +44,9 @@ class WB_OT_RemoveSimulation(Operator):
     )
 
     def exectute(self, context: Context):
-        scene = context.scene
-        assert scene is not None
-
-        manager = get_manager(context)
-        wb = props.scene_properties(context)
-        manager.remove(wb.manager_active_index)
-        wb.manager_active_index = max(0, wb.manager_active_index - 1)
-
+        man = get_manager(context)
+        man.remove(man.item_index)
+        man.item_index = max(0, man.item_index - 1)
         return {"FINISHED"}
 
 
