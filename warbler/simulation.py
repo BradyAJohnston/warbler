@@ -1,3 +1,4 @@
+from bpy.types import Object
 from .geometryset import GeometrySet
 import bpy
 import warp as wp
@@ -5,32 +6,19 @@ import newton
 import numpy as np
 import databpy as db
 from .utils import smooth_lerp, blender_to_quat, quat_to_blender
-from .props import WarblerSceneProperties, WarblerObjectProperties
+from .props import WarblerObjectProperties, SimulationListItem
 from uuid import uuid1
 from typing import TYPE_CHECKING
+from abc import ABC
 
 if TYPE_CHECKING:
     from .manager import SimulationManager
 
 
-class Simulation:
-    """Physics simulation integrating Newton Physics with Blender.
-
-    Follows Newton's architecture pattern:
-    ModelBuilder → Model → State → Solver → Updated State
-    """
-
-    # ============================================================================
-    # Scene Properties (read from Blender)
-    # ============================================================================
-
+class SimulatorBase(ABC):
     @property
     def scene(self) -> bpy.types.Scene:
         return bpy.context.scene
-
-    @property
-    def props(self) -> WarblerSceneProperties:
-        return self.scene.wb  # type: ignore
 
     @property
     def fps(self) -> int:
@@ -39,6 +27,59 @@ class Simulation:
     @property
     def frame_dt(self) -> float:
         return 1 / self.fps
+
+    @property
+    def uuid(self) -> str:
+        return self._uuid
+
+    @property
+    def manager(self) -> "SimulationManager":
+        if self._manager is None:
+            raise RuntimeError
+        return self._manager
+
+    @property
+    def substeps(self) -> int:
+        return self.props.substeps
+
+    @substeps.setter
+    def substeps(self, value: int) -> None:
+        self.props.substeps = value
+
+    @property
+    def device(self) -> str:
+        return self.props.device
+
+    @device.setter
+    def device(self, value: str) -> None:
+        self.props.device = value
+
+    @property
+    def props(self) -> SimulationListItem:
+        return self.manager.sim_items[self.uuid]
+
+    @property
+    def is_active(self) -> bool:
+        return self.manager.sim_items[self.uuid].is_active
+
+    def __init__(self):
+        self._uuid: str = str(uuid1())
+        self._manager: SimulationManager | None = None
+
+    def _compile(self) -> None:
+        raise NotImplementedError
+
+    def compile(self) -> None:
+        self._compile()
+        self.props.is_compiled = True
+
+
+class SimulatorXPBD(SimulatorBase):
+    """Physics simulation integrating Newton Physics with Blender.
+
+    Follows Newton's architecture pattern:
+    ModelBuilder → Model → State → Solver → Updated State
+    """
 
     @property
     def ke(self) -> float:
@@ -61,18 +102,11 @@ class Simulation:
         return self.props.particle_radius
 
     @property
-    def uuid(self) -> str:
-        return self._uuid
-
-    @property
-    def manager(self) -> "SimulationManager":
-        if self._manager is None:
-            raise RuntimeError
-        return self._manager
-
-    @property
-    def is_active(self) -> bool:
-        return self.manager.sim_items[self.uuid].is_active
+    def objects(self) -> list[Object]:
+        obj = bpy.context.active_object
+        if obj is None:
+            return []
+        return [obj]
 
     # ============================================================================
     # Initialization
@@ -80,65 +114,40 @@ class Simulation:
 
     def __init__(
         self,
-        num_particles: int,
-        substeps: int = 5,
-        objects: list[bpy.types.Object] = [],
-        up_vector=(0, 0, 1),
-        ivelocity=(0, 0, 10),
-        add_ground: bool = True,
-        particle_object: bpy.types.Object | None = None,
     ):
-        """Initialize simulation with specified parameters.
-
-        Args:
-            num_particles: Number of particles (will be cubed)
-            substeps: Number of solver iterations per timestep
-            links: Whether to add springs between particles
-            objects: Blender objects to include as rigid bodies
-            up_vector: World up direction
-            ivelocity: Initial particle velocity
-            add_ground: Whether to add ground plane
-        """
-        # Store configuration
-        self.num_particles: int = num_particles
-        self.objects: list = objects
-        self.builder: newton.ModelBuilder = self._create_model_builder(up_vector)
+        """Initialize simulation with specified parameters."""
+        super().__init__()
         self.clock: int = 0
         self.bob: db.BlenderObject | None = None
-        self._uuid: str = str(uuid1())
-        self._manager: SimulationManager | None = None
 
-        self._add_rigid_bodies(objects)
-        if add_ground:
+    def _compile(self) -> None:
+        self.build()
+        self.finalize()
+
+    def build(self):
+        self.builder: newton.ModelBuilder = self._create_model_builder(
+            self.props.ground_plane_vector
+        )
+        self._add_rigid_bodies(self.objects)
+        if self.props.use_ground_plane:
             self.builder.add_ground_plane()
 
-        if particle_object is not None:
-            geo = GeometrySet(particle_object)
+        if self.props.particle_source is not None:
+            geo = GeometrySet(self.props.particle_source)
             self._add_particles(**geo.pointcloud.to_props())
-        else:
-            positions = np.random.random((num_particles, 3))
-            self._add_particles(positions)
 
-        # Finalize model (Model phase)
-        self.model = self.builder.finalize(device="cuda")
+    def finalize(self):
+        self.model = self.builder.finalize(device=self.device)
 
-        # Create simulation state (State phase)
         self.state_0: newton.State = self.model.state()
         self.state_1: newton.State = self.model.state()
 
-        # Create solver (Solver phase)
         self.solver = newton.solvers.SolverXPBD(
             model=self.model,
-            iterations=substeps,
+            iterations=self.substeps,
         )
-
-        # Create control
         self.control = self.model.control()
         self.create_pointcloud()
-
-    # ============================================================================
-    # Model Building (ModelBuilder → Model)
-    # ============================================================================
 
     def _create_model_builder(self, up_vector: tuple) -> newton.ModelBuilder:
         """Create and configure ModelBuilder with up axis and particle settings."""

@@ -1,4 +1,4 @@
-from .simulation import Simulation
+from .simulation import SimulatorXPBD, SimulatorBase
 import bpy
 from bpy.types import Context, Scene
 from bpy.app.handlers import persistent
@@ -7,7 +7,7 @@ from . import props
 
 class SimulationManager:
     def __init__(self):
-        self.simulations: dict[str, Simulation] = {}
+        self.simulations: dict[str, SimulatorXPBD] = {}
 
     @property
     def scene(self) -> Scene:
@@ -21,7 +21,19 @@ class SimulationManager:
     def sim_items(self) -> bpy.types.bpy_prop_collection_idprop:  ## type: ignore
         return self.scene.wb_sim_list  # type: ignore
 
-    def add(self, simulation: Simulation) -> None:
+    @property
+    def item_index(self) -> int:
+        return self.wb_props.manager_active_index
+
+    @item_index.setter
+    def item_index(self, value: int) -> None:
+        self.wb_props.manager_active_index = value
+
+    def get(self, value: int) -> SimulatorBase:
+        item = self.sim_items[value]
+        return self.simulations[item.name]
+
+    def add(self, simulation: SimulatorXPBD) -> None:
         self.simulations[simulation.uuid] = simulation
         item = self.sim_items.add()
         item.name = simulation.uuid
