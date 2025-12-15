@@ -1,19 +1,12 @@
-from bpy.props import IntProperty
 from bpy.types import Operator, Context
 from .manager import get_manager
 from .simulation import SimulatorXPBD
-from . import props
 
 
 class WB_OT_AddSimulation(Operator):
     bl_idname = "wb.add_simulation"
     bl_label = "New Simulation"
     bl_description = "Add a new simulation to tweak before being sent to the GPU"
-
-    def invoke(self, context, event):
-        if context.area and context.area.type == "VIEW_3D":
-            context.window_manager.invoke_props_dialog(self)
-        return {"RUNNING_MODAL"}
 
     def execute(self, context):
         man = get_manager(context)
@@ -26,12 +19,9 @@ class WB_OT_CompileSimulation(Operator):
     bl_label = "Compile"
     bl_description = "Compile this simulation and send to the GPU for evaluation."
 
-    sim_item_index: IntProperty()  # type: ignore
-
     def execute(self, context):
         man = get_manager(context)
-        sim = man.get(man.item_index)
-        sim.compile()
+        man.active_simulation.compile()
 
         return {"FINISHED"}
 
@@ -43,9 +33,14 @@ class WB_OT_RemoveSimulation(Operator):
         "Delete and remove a simulation from the list of those being computed"
     )
 
-    def exectute(self, context: Context):
+    def execute(self, context: Context):
         man = get_manager(context)
-        man.remove(man.item_index)
+        item = man.active_item
+        try:
+            del man.simulations[item.name]
+            man.sim_items.remove(man.item_index)
+        except Exception:
+            man.sim_items.remove(man.item_index)
         man.item_index = max(0, man.item_index - 1)
         return {"FINISHED"}
 

@@ -10,6 +10,8 @@ from .props import WarblerObjectProperties, SimulationListItem
 from uuid import uuid1
 from typing import TYPE_CHECKING
 from abc import ABC
+import time
+
 
 if TYPE_CHECKING:
     from .manager import SimulationManager
@@ -437,8 +439,11 @@ class SimulatorXPBD(SimulatorBase):
         Flow: Blender → Simulation → Solve → Blender
         """
         self._update_simulation_from_blender()
+        start_simulate = time.time()
         self.simulate()
+        self.props.time_compute = time.time() - start_simulate
+        start_sync = time.time()
         self._update_blender_from_simulation()
         self._update_particle_visualization()
-
+        self.props.time_sync = time.time() - start_sync
         self.clock += 1

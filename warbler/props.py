@@ -13,7 +13,8 @@ from bpy.props import (
 
 class SimulationListItem(bpy.types.PropertyGroup):
     name: StringProperty(name="UUID")  # type: ignore
-    compute_time: FloatProperty(name="Time", default=0.0)  # type: ignore
+    time_compute: FloatProperty(name="Time", default=0.0)  # type: ignore
+    time_sync: FloatProperty(name="Time", default=0.0)  # type: ignore
     is_active: BoolProperty(name="Active", default=True)  # type: ignore
     is_compiled: BoolProperty(name="Compiled", default=False)  # type: ignore
     substeps: IntProperty(name="Substeps", default=5, min=0, soft_max=100)  # type: ignore
@@ -28,7 +29,6 @@ class SimulationListItem(bpy.types.PropertyGroup):
         ),
         default="cuda",
     )
-
     use_ground_plane: BoolProperty("Ground Plane", default=True)  # type: ignore
     ground_plane_vector: FloatVectorProperty("Ground Normal", default=(0, 0, 1))  # type: ignore
 
@@ -98,17 +98,6 @@ class WB_UL_SimulationList(bpy.types.UIList):
 
 class WarblerSceneProperties(PropertyGroup):
     manager_active_index: IntProperty()  # type: ignore
-
-    simulation_substeps: IntProperty(  # type: ignore
-        name="Simulation Substeps",
-        description="Number of substeps per frame",
-        default=5,
-    )
-    simulation_links: BoolProperty(  # type: ignore
-        name="Simulation Links",
-        description="Enable links between objects in the simulation",
-        default=False,
-    )
 
 
 def scene_properties(context: Context | None) -> WarblerSceneProperties:

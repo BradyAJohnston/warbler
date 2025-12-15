@@ -29,6 +29,14 @@ class SimulationManager:
     def item_index(self, value: int) -> None:
         self.wb_props.manager_active_index = value
 
+    @property
+    def active_item(self) -> props.SimulationListItem:
+        return self.sim_items[self.item_index]
+
+    @property
+    def active_simulation(self) -> SimulatorBase:
+        return self.simulations[self.active_item.name]
+
     def get(self, value: int) -> SimulatorBase:
         item = self.sim_items[value]
         return self.simulations[item.name]
