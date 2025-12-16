@@ -1,7 +1,7 @@
-from bpy.types import Panel
-from bpy.types import UILayout
-from .ops import WB_OT_AddSimulation, WB_OT_RemoveSimulation, WB_OT_CompileSimulation
+from bpy.types import Panel, UILayout
+
 from .manager import get_manager
+from .ops import WB_OT_AddSimulation, WB_OT_CompileSimulation, WB_OT_RemoveSimulation
 
 
 class WB_PT_WarblerPanel(Panel):
@@ -30,8 +30,8 @@ class WB_PT_WarblerPanel(Panel):
         row.template_list(
             "WB_UL_SimulationList",
             "A list",
-            context.scene,
-            "wb_sim_list",
+            context.scene.wb,
+            "sim_list",
             context.scene.wb,
             "manager_active_index",
             rows=3,

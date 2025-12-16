@@ -19,7 +19,7 @@ class SimulationManager:
 
     @property
     def sim_items(self) -> bpy.types.bpy_prop_collection_idprop:  ## type: ignore
-        return self.scene.wb_sim_list  # type: ignore
+        return self.scene.wb.sim_list  # type: ignore
 
     @property
     def item_index(self) -> int:

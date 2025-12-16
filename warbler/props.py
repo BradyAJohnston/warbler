@@ -1,14 +1,15 @@
-from bpy.types import PropertyGroup, Object, Context
 import bpy
 from bpy.props import (
+    BoolProperty,
+    CollectionProperty,
     EnumProperty,
     FloatProperty,
-    IntProperty,
-    StringProperty,
-    BoolProperty,
-    PointerProperty,
     FloatVectorProperty,
+    IntProperty,
+    PointerProperty,
+    StringProperty,
 )
+from bpy.types import Context, Object, PropertyGroup
 
 
 class SimulationListItem(bpy.types.PropertyGroup):
@@ -98,6 +99,7 @@ class WB_UL_SimulationList(bpy.types.UIList):
 
 class WarblerSceneProperties(PropertyGroup):
     manager_active_index: IntProperty()  # type: ignore
+    sim_list: CollectionProperty(type=SimulationListItem)  # type: ignore
 
 
 def scene_properties(context: Context | None) -> WarblerSceneProperties:
@@ -180,8 +182,8 @@ class WarblerObjectProperties(PropertyGroup):
 
 
 CLASSES = [
-    WarblerObjectProperties,
-    WarblerSceneProperties,
     SimulationListItem,
     WB_UL_SimulationList,
+    WarblerObjectProperties,
+    WarblerSceneProperties,
 ]
