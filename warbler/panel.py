@@ -23,7 +23,6 @@ class WB_PT_WarblerPanel(Panel):
 
         layout.separator()
         layout.label(text="Active Object Settings")
-        # layout.prop(obj.wb, "rigid_is_active")
 
         row = layout.row()
 
@@ -43,8 +42,7 @@ class WB_PT_WarblerPanel(Panel):
 
         try:
             item = man.active_item
-        except Exception as e:
-            print(e)
+        except IndexError:
             return
 
         col = layout.column()

@@ -5,8 +5,13 @@ import warp as wp
 import newton
 import numpy as np
 import databpy as db
-from .utils import smooth_lerp, blender_to_quat, quat_to_blender
-from .props import WarblerObjectProperties, SimulationListItem
+from .utils import (
+    smooth_lerp,
+    blender_rotation,
+    wp_transform,
+)
+from . import rigid
+from .props import SimulationListItem
 from uuid import uuid1
 from typing import TYPE_CHECKING
 from abc import ABC
@@ -168,39 +173,20 @@ class SimulatorXPBD(SimulatorBase):
     def _add_rigid_bodies(self, objects: list[bpy.types.Object]):
         """Add Blender objects as rigid bodies to the model."""
         for obj in objects:
-            obj.rotation_mode = "QUATERNION"
+            rig = rigid.RigidObject(obj)
+            body = self.builder.add_body(mass=1e5, xform=rig.wp_transform())
 
-            # Create body with transform from Blender
-            initial_transform = wp.transform(
-                wp.vec3(*obj.location),
-                wp.quat(*blender_to_quat(obj.rotation_quaternion)),
-            )
-            body = self.builder.add_body(mass=1e5, xform=initial_transform)
-
-            # Valid ShapeConfig parameters (from newton.ModelBuilder.ShapeConfig signature)
-            # Note: rolling_friction and torsional_friction are not ShapeConfig parameters
-
-            props: list[str] = [
-                x for x in dir(WarblerObjectProperties) if x.startswith("rigid_")
-            ]
-
-            # Source properties from Blender object and pass to ShapeConfig
-            if obj.wb.rigid_shape == "CUBE":  # type: ignore
-                prop_dict = {
-                    name.replace("rigid_", ""): getattr(obj.wb, name) for name in props
-                }  # type: ignore
-                shape_cfg = newton.ModelBuilder.ShapeConfig(**prop_dict)
-
-                obj.wb.rigid_body_index = self.builder.add_shape_box(  # type: ignore
+            if obj.wb.sim_shape == "CUBE":  # type: ignore
+                obj.wb.sim_body_index = self.builder.add_shape_box(  # type: ignore
                     body=body,
-                    xform=wp.transform(wp.vec3(0, 0, 0), wp.quat_identity(float)),
+                    xform=wp_transform(),
                     hx=obj.dimensions[0] / 2.0,
                     hy=obj.dimensions[1] / 2.0,
                     hz=obj.dimensions[2] / 2.0,
-                    cfg=shape_cfg,
+                    cfg=rig.shape_config(),
                 )
             else:
-                print(Warning(f"Unsupported shape {obj.wb.rigid_shape}"))  # type: ignore
+                print(Warning(f"Unsupported shape {obj.wb.sim_shape}"))  # type: ignore
 
     def _add_particles(
         self,
@@ -267,12 +253,11 @@ class SimulatorXPBD(SimulatorBase):
         """Copy physics-controlled body transforms from simulation to Blender."""
         if self.state_0.body_q is None:
             return
-
         rigid_transforms = self.state_0.body_q.numpy()
         for i, obj in enumerate(self.objects):
-            if obj.wb.rigid_is_active:
-                obj.location = rigid_transforms[i, 0:3]
-                obj.rotation_quaternion = quat_to_blender(rigid_transforms[i, 3:7])
+            rig = rigid.RigidObject(obj)
+            if rig.is_active:
+                rig.transform_from_wp(rigid_transforms[i])
 
     def _update_simulation_from_blender(self):
         """Copy manually-controlled body transforms from Blender to simulation."""
@@ -286,9 +271,9 @@ class SimulatorXPBD(SimulatorBase):
 
         new_transforms = []
         for i, obj in enumerate(self.objects):
-            obj.rotation_mode = "QUATERNION"
+            rig = rigid.RigidObject(obj)
 
-            if not obj.wb.rigid_is_active:
+            if not rig.is_active:
                 transform = self._get_manual_body_transform(
                     obj, current_sim_transforms[i], body_velocities, i
                 )
@@ -317,7 +302,7 @@ class SimulatorXPBD(SimulatorBase):
         to avoid jarring movements. Their velocity is calculated to push particles
         but then zeroed to prevent self-movement.
         """
-        rot = blender_to_quat(obj.rotation_quaternion)
+        rot = blender_rotation(obj.rotation_quaternion)
         loc = np.array(obj.location)
 
         # Apply smoothing (except first frame)
@@ -365,7 +350,7 @@ class SimulatorXPBD(SimulatorBase):
             )  # type: ignore
 
         # Store manual body transforms before solving
-        manual_body_transforms = self._get_manual_body_transforms()
+        # manual_body_transforms = self._get_manual_body_transforms()
 
         # Run solver (State → Solver → Updated State)
         contacts = self.model.collide(self.state_0)
@@ -374,38 +359,38 @@ class SimulatorXPBD(SimulatorBase):
         )
 
         # Restore manual bodies (kinematic constraint)
-        self._restore_manual_body_transforms(manual_body_transforms)
+        # self._restore_manual_body_transforms(manual_body_transforms)
 
         # Swap double-buffered states
         self.state_0, self.state_1 = self.state_1, self.state_0
 
-    def _get_manual_body_transforms(self) -> dict[int, np.ndarray]:
-        """Get transforms of manually-controlled bodies before physics solve."""
-        manual_transforms = {}
-        if self.state_0.body_q is not None:
-            current_transforms = self.state_0.body_q.numpy()
-            for i, obj in enumerate(self.objects):
-                if not obj.wb.rigid_is_active:
-                    manual_transforms[i] = current_transforms[i].copy()
-        return manual_transforms
+    # def _get_manual_body_transforms(self) -> dict[int, np.ndarray]:
+    #     """Get transforms of manually-controlled bodies before physics solve."""
+    #     manual_transforms = {}
+    #     if self.state_0.body_q is not None:
+    #         current_transforms = self.state_0.body_q.numpy()
+    #         for i, obj in enumerate(self.objects):
+    #             if not obj.wb.is_active:
+    #                 manual_transforms[i] = current_transforms[i].copy()
+    #     return manual_transforms
 
-    def _restore_manual_body_transforms(self, manual_transforms: dict[int, np.ndarray]):
-        """Restore manually-controlled bodies to fixed positions (kinematic behavior)."""
-        if not manual_transforms or self.state_1.body_q is None:
-            return
+    # def _restore_manual_body_transforms(self, manual_transforms: dict[int, np.ndarray]):
+    #     """Restore manually-controlled bodies to fixed positions (kinematic behavior)."""
+    #     if not manual_transforms or self.state_1.body_q is None:
+    #         return
 
-        # Restore positions
-        solved_transforms = self.state_1.body_q.numpy()
-        for i, transform in manual_transforms.items():
-            solved_transforms[i] = transform
-        self.state_1.body_q.assign(solved_transforms)
+    #     # Restore positions
+    #     solved_transforms = self.state_1.body_q.numpy()
+    #     for i, transform in manual_transforms.items():
+    #         solved_transforms[i] = transform
+    #     self.state_1.body_q.assign(solved_transforms)
 
-        # Zero velocities to prevent movement
-        if hasattr(self.state_1, "body_qd") and self.state_1.body_qd is not None:
-            body_velocities = self.state_1.body_qd.numpy()
-            for i in manual_transforms.keys():
-                body_velocities[i] = 0.0
-            self.state_1.body_qd.assign(body_velocities)
+    #     # Zero velocities to prevent movement
+    #     if hasattr(self.state_1, "body_qd") and self.state_1.body_qd is not None:
+    #         body_velocities = self.state_1.body_qd.numpy()
+    #         for i in manual_transforms.keys():
+    #             body_velocities[i] = 0.0
+    #         self.state_1.body_qd.assign(body_velocities)
 
     # ============================================================================
     # Visualization
@@ -420,7 +405,10 @@ class SimulatorXPBD(SimulatorBase):
             name=name,
         )
 
-        self.particle_object["radius"] = self.particle_radii
+        self.particle_object.store_named_attribute(
+            np.array(self.builder.particle_radius),
+            "radius",
+        )
 
     def _update_particle_visualization(self):
         """Update particle mesh with current simulation state."""

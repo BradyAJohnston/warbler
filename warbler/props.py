@@ -115,17 +115,18 @@ class WarblerObjectProperties(PropertyGroup):
         description="Unique identifier for this object, for linking to objects in the simulation",
         default="",
     )
-    rigid_body_index: IntProperty(  # type: ignore
+    mass: FloatProperty(name="Mass", description="Mass of the rigid body", default=1e2)  # type: ignore
+    sim_body_index: IntProperty(  # type: ignore
         name="Rigid Body Index",
         description="Index of the rigid body in the simulation",
         default=-1,
     )
-    rigid_is_active: BoolProperty(  # type: ignore
+    is_active: BoolProperty(  # type: ignore
         name="Is Active",
         description="Active ridid body in the simulation, updating it's position based on forces",
         default=False,
     )
-    rigid_shape: EnumProperty(  # type: ignore
+    sim_shape: EnumProperty(  # type: ignore
         name="Shape",
         description="Shape of the rigid body in the simulation",
         items=[
