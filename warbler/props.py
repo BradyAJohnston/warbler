@@ -33,6 +33,12 @@ class SimulationListItem(bpy.types.PropertyGroup):
     use_ground_plane: BoolProperty("Ground Plane", default=True)  # type: ignore
     ground_plane_vector: FloatVectorProperty("Ground Normal", default=(0, 0, 1))  # type: ignore
 
+    sim_rigid_collection: PointerProperty(  # type: ignore
+        type=bpy.types.Collection,  # type: ignore
+        name="Collection",
+        description="Collection of objects that will be used as rigid bodies in the simulation.",
+    )
+
     spring_ke: FloatProperty(  # type: ignore
         name="Spring Stiffness",
         description="Stiffness constant for springs in the simulation",
@@ -52,11 +58,6 @@ class SimulationListItem(bpy.types.PropertyGroup):
         name="Simulation Scale",
         description="Scale factor for the simulation, scaling all distances and sizes",
         default=1.0,
-    )
-    particle_radius: FloatProperty(  # type: ignore
-        name="Particle Radius",
-        description="Radius of the particles in the simulation",
-        default=0.1,
     )
     particle_source: PointerProperty(  # type: ignore
         type=Object,  # type: ignore

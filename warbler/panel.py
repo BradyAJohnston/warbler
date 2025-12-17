@@ -1,6 +1,7 @@
 from bpy.types import UILayout, Panel
-
+import bpy
 from .manager import get_manager
+from .props import WarblerObjectProperties
 from .ops import WB_OT_AddSimulation, WB_OT_CompileSimulation, WB_OT_RemoveSimulation
 
 
@@ -11,6 +12,28 @@ def create_panel(
         idname = "NewPanelName"
     header, panel = layout.panel(idname, default_closed=default_closed)
     return header, panel
+
+
+class WB_UL_RigidBodyCollection(bpy.types.UIList):
+    def draw_item(  # type: ignore
+        self,
+        context,
+        layout: bpy.types.UILayout,
+        data,
+        item: bpy.types.Object,
+        icon,
+        active_data,
+        active_property,
+        *,
+        index=0,
+        flt_flag=0,
+    ):
+        layout: bpy.types.UILayout = layout
+        props: WarblerObjectProperties = item.wb  # type: ignore
+
+        row = layout.row()
+        row.label(text=item.name)
+        row.prop(props, "is_active", text="", icon_only=True, icon="ADD")
 
 
 class WB_PT_WarblerPanel(Panel):
@@ -24,9 +47,7 @@ class WB_PT_WarblerPanel(Panel):
         assert layout is not None and context is not None
         man = get_manager(context)
         layout.label(text="Simulation Settings")
-        obj = context.active_object
-        if obj is None:
-            return
+        # obj = context.active_object
 
         layout.prop(context.scene.render, "fps")
 
@@ -37,7 +58,7 @@ class WB_PT_WarblerPanel(Panel):
 
         row.template_list(
             "WB_UL_SimulationList",
-            "A list",
+            "warbler_simulations",
             context.scene.wb,
             "sim_list",
             context.scene.wb,
@@ -57,6 +78,16 @@ class WB_PT_WarblerPanel(Panel):
         col = layout.column()
         col.enabled = not item.is_compiled
 
+        col.template_list(
+            "WB_UL_RigidBodyCollection",
+            "{}_rigid_objects".format(item.name),
+            item.sim_rigid_collection,
+            "objects",
+            context.scene.wb,
+            "manager_active_index",
+            rows=3,
+        )
+
         if item.is_compiled:
             full_time = item.time_sync + item.time_compute
             col.label(text=f"Simulation time: {full_time * 1e3:,.2f} ms")
@@ -69,8 +100,7 @@ class WB_PT_WarblerPanel(Panel):
         header.label(text="Particles")
         if panel:
             col = panel.column()
-            col.prop(item, "particle_source")
-            col.prop(item, "particle_radius")
+            col.prop(item, "particle_source", text="Source")
 
             header, panel = create_panel(panel, "spring")
             if header:
@@ -86,13 +116,17 @@ class WB_PT_WarblerPanel(Panel):
         if panel:
             col = panel.column()
 
+            col.prop(item, "sim_rigid_collection")
             col.prop(item, "rigid_decay_frames")
             col.prop(item, "substeps")
             col.prop(item, "is_active")
 
         row = layout.row()
         row.scale_y = 2
-        row.operator(WB_OT_CompileSimulation.bl_idname)
+        row.operator(
+            WB_OT_CompileSimulation.bl_idname,
+            text="Compile" if not item.is_compiled else "Re-Compile",
+        )
 
 
-CLASSES = [WB_PT_WarblerPanel]
+CLASSES = [WB_PT_WarblerPanel, WB_UL_RigidBodyCollection]

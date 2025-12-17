@@ -105,15 +105,8 @@ class SimulatorXPBD(SimulatorBase):
         return self.props.scale
 
     @property
-    def particle_radius(self) -> float:
-        return self.props.particle_radius
-
-    @property
     def objects(self) -> list[Object]:
-        obj = bpy.context.active_object
-        if obj is None:
-            return []
-        return [obj]
+        return [o for o in self.props.sim_rigid_collection.objects]
 
     # ============================================================================
     # Initialization
@@ -126,15 +119,25 @@ class SimulatorXPBD(SimulatorBase):
         super().__init__()
         self.clock: int = 0
         self.bob: db.BlenderObject | None = None
+        self.search_radius = 1.0
 
     def _compile(self) -> None:
+        if self.props.is_compiled:
+            del self.model
         self.build()
         self.finalize()
 
     def build(self):
-        self.builder: newton.ModelBuilder = self._create_model_builder(
-            self.props.ground_plane_vector
-        )
+        # axis_map = {
+        #     (0, 0, 1): newton.Axis.Z,
+        #     (0, 1, 0): newton.Axis.Y,
+        #     (1, 0, 0): newton.Axis.X,
+        # }
+        # up_axis = axis_map.get(self.props.ground_plane_vector, newton.Axis.Z)
+
+        self.builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        self.builder.default_particle_radius = 1.0
+
         self._add_rigid_bodies(self.objects)
         if self.props.use_ground_plane:
             self.builder.add_ground_plane()
@@ -144,7 +147,7 @@ class SimulatorXPBD(SimulatorBase):
             self._add_particles(**geo.pointcloud.to_props())
 
     def finalize(self):
-        self.model = self.builder.finalize(device=self.device)
+        self.model: newton.Model = self.builder.finalize(device=self.device)
 
         self.state_0: newton.State = self.model.state()
         self.state_1: newton.State = self.model.state()
@@ -154,21 +157,9 @@ class SimulatorXPBD(SimulatorBase):
             iterations=self.substeps,
         )
         self.control = self.model.control()
+        if self.props.is_compiled:
+            bpy.data.objects.remove(self.particle_object.object)
         self.create_pointcloud()
-
-    def _create_model_builder(self, up_vector: tuple) -> newton.ModelBuilder:
-        """Create and configure ModelBuilder with up axis and particle settings."""
-        # Convert up_vector to Newton axis enum
-        axis_map = {
-            (0, 0, 1): newton.Axis.Z,
-            (0, 1, 0): newton.Axis.Y,
-            (1, 0, 0): newton.Axis.X,
-        }
-        up_axis = axis_map.get(up_vector, newton.Axis.Z)
-
-        builder = newton.ModelBuilder(up_axis=up_axis)
-        builder.default_particle_radius = self.particle_radius
-        return builder
 
     def _add_rigid_bodies(self, objects: list[bpy.types.Object]):
         """Add Blender objects as rigid bodies to the model."""
@@ -195,8 +186,6 @@ class SimulatorXPBD(SimulatorBase):
         mass: np.ndarray | None = None,
         radius: np.ndarray | None = None,
     ) -> None:
-        self.particle_radii = radius
-
         if velocity is None:
             velocity = np.zeros(position.shape, dtype=float)
         if mass is None:
@@ -204,39 +193,14 @@ class SimulatorXPBD(SimulatorBase):
         if radius is None:
             radius = np.repeat(0.1, position.shape[0])
 
+        self.search_radius = max(radius) * 2
+
         self.builder.add_particles(
             pos=position,  # type: ignore
             vel=velocity,  # type: ignore
             mass=mass,  # type: ignore
             radius=radius,  # type: ignore
         )
-
-    def _add_particle_grid(
-        self,
-        num_particles: int,
-        ivelocity: tuple,
-    ):
-        """Add particle grid to the model."""
-        # Calculate grid dimensions
-        n_x = n_y = n_z = int(num_particles ** (1 / 3))
-
-        self.builder.add_particle_grid(
-            dim_x=n_x,
-            dim_y=n_y,
-            dim_z=n_z,
-            cell_x=0.1 * 2.0,
-            cell_y=0.1 * 2.0,
-            cell_z=0.1 * 2.0,
-            pos=wp.vec3(-1.0, 0.0, 0.0),  # type: ignore
-            rot=wp.quat_identity(),  # type: ignore
-            vel=wp.vec3(*ivelocity),  # type: ignore
-            mass=1,
-            jitter=self.particle_radius * 0.1,
-            radius_mean=self.particle_radius,
-        )
-
-        # Update actual particle count
-        self.num_particles = n_x * n_y * n_z
 
     def _add_springs(self):
         """Add spring constraints between consecutive particles."""
@@ -344,11 +308,7 @@ class SimulatorXPBD(SimulatorBase):
         """
         # Prepare state for simulation
         self.state_0.clear_forces()
-        if self.model.particle_grid is not None:
-            self.model.particle_grid.build(
-                self.state_0.particle_q, self.particle_radius * 2
-            )  # type: ignore
-
+        self.model.particle_grid.build(self.state_0.particle_q, self.search_radius)
         # Store manual body transforms before solving
         # manual_body_transforms = self._get_manual_body_transforms()
 
