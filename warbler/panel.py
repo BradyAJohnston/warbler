@@ -1,7 +1,16 @@
-from bpy.types import Panel, UILayout
+from bpy.types import UILayout, Panel
 
 from .manager import get_manager
 from .ops import WB_OT_AddSimulation, WB_OT_CompileSimulation, WB_OT_RemoveSimulation
+
+
+def create_panel(
+    layout: UILayout, idname: str | None = None, default_closed: bool = False
+) -> tuple[UILayout, UILayout]:
+    if idname is None:
+        idname = "NewPanelName"
+    header, panel = layout.panel(idname, default_closed=default_closed)
+    return header, panel
 
 
 class WB_PT_WarblerPanel(Panel):
@@ -54,16 +63,34 @@ class WB_PT_WarblerPanel(Panel):
             col.label(text=f"Compute:  {item.time_compute * 1e3:,.2f} ms")
             col.label(text=f"Sync:  {item.time_sync * 1e3:,.2f} ms")
 
-        col.prop(item, "rigid_decay_frames")
-        col.prop(item, "spring_ke")
-        col.prop(item, "spring_kd")
-        col.prop(item, "spring_kf")
         col.prop(item, "scale")
-        col.prop(item, "particle_radius")
-        col.prop(item, "particle_source")
-        col.prop(item, "substeps")
-        col.prop(item, "is_active")
-        row = col.row()
+
+        header, panel = create_panel(layout, idname="particles")
+        header.label(text="Particles")
+        if panel:
+            col = panel.column()
+            col.prop(item, "particle_source")
+            col.prop(item, "particle_radius")
+
+            header, panel = create_panel(panel, "spring")
+            if header:
+                header.label(text="Springs")
+            if panel:
+                col = panel.column()
+                col.prop(item, "spring_ke")
+                col.prop(item, "spring_kd")
+                col.prop(item, "spring_kf")
+
+        header, panel = create_panel(layout, idname="rigid_bodies")
+        header.label(text="Rigid Bodies")
+        if panel:
+            col = panel.column()
+
+            col.prop(item, "rigid_decay_frames")
+            col.prop(item, "substeps")
+            col.prop(item, "is_active")
+
+        row = layout.row()
         row.scale_y = 2
         row.operator(WB_OT_CompileSimulation.bl_idname)
 
