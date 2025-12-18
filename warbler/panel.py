@@ -1,8 +1,9 @@
-from bpy.types import UILayout, Panel
 import bpy
+from bpy.types import Panel, UILayout
+
 from .manager import get_manager
-from .props import WarblerObjectProperties
 from .ops import WB_OT_AddSimulation, WB_OT_CompileSimulation, WB_OT_RemoveSimulation
+from .props import WarblerObjectProperties, WarblerSceneProperties
 
 
 def create_panel(
@@ -17,7 +18,7 @@ def create_panel(
 class WB_UL_RigidBodyCollection(bpy.types.UIList):
     def draw_item(  # type: ignore
         self,
-        context,
+        context: bpy.types.Context,
         layout: bpy.types.UILayout,
         data,
         item: bpy.types.Object,
@@ -28,9 +29,7 @@ class WB_UL_RigidBodyCollection(bpy.types.UIList):
         index=0,
         flt_flag=0,
     ):
-        layout: bpy.types.UILayout = layout
         props: WarblerObjectProperties = item.wb  # type: ignore
-
         row = layout.row()
         row.label(text=item.name)
         row.prop(props, "is_active", text="", icon_only=True, icon="ADD")
@@ -46,6 +45,7 @@ class WB_PT_WarblerPanel(Panel):
         layout: UILayout = self.layout
         assert layout is not None and context is not None
         man = get_manager(context)
+        sprops: WarblerSceneProperties = context.scene.wb  # type: ignore
         layout.label(text="Simulation Settings")
         # obj = context.active_object
 
@@ -59,9 +59,9 @@ class WB_PT_WarblerPanel(Panel):
         row.template_list(
             "WB_UL_SimulationList",
             "warbler_simulations",
-            context.scene.wb,
+            sprops,
             "sim_list",
-            context.scene.wb,
+            sprops,
             "manager_active_index",
             rows=3,
         )
@@ -83,7 +83,7 @@ class WB_PT_WarblerPanel(Panel):
             "{}_rigid_objects".format(item.name),
             item.sim_rigid_collection,
             "objects",
-            context.scene.wb,
+            sprops,
             "manager_active_index",
             rows=3,
         )

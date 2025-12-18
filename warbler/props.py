@@ -184,6 +184,8 @@ class WarblerObjectProperties(PropertyGroup):
 
 
 CLASSES = [
+    # have to make sure we register the item -> list -> collection in order
+    # otherwise Blender won't know about the others when registering
     SimulationListItem,
     WB_UL_SimulationList,
     WarblerObjectProperties,
