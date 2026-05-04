@@ -22,5 +22,6 @@ dev = [
     "scipy",
     "fake-bpy-module",
     "ty>=0.0.2",
+    "urllib3>=2.6.3"
 ]
 docs = ["quartodoc", "quarto-cli>=1.9", "tomlkit"]
