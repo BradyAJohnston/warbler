@@ -10,6 +10,7 @@ requires-python = "~=3.13.0"
 dependencies = [
     "newton>=1.1.0",
     "databpy>=0.7.0",
+    "urllib3>=2.7.0",
 ]
 
 [project.optional-dependencies]
