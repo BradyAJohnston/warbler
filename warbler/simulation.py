@@ -6,6 +6,7 @@ import newton
 import numpy as np
 import databpy as db
 from .utils import (
+    get_scene,
     smooth_lerp,
     blender_rotation,
     wp_transform,
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 class SimulatorBase(ABC):
     @property
     def scene(self) -> bpy.types.Scene:
-        return bpy.context.scene
+        return get_scene()
 
     @property
     def fps(self) -> int:
@@ -254,7 +255,7 @@ class SimulatorXPBD(SimulatorBase):
             new_transforms.append(transform)
 
         self.state_0.body_q.assign(new_transforms)
-        if body_velocities is not None:
+        if body_velocities is not None and self.state_0.body_qd is not None:
             self.state_0.body_qd.assign(body_velocities)
 
     def _get_manual_body_transform(

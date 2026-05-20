@@ -8,6 +8,28 @@ from .props import WarblerObjectProperties, WarblerSceneProperties
 # Attributes warbler knows how to map into a simulation
 _KNOWN_PARTICLE_ATTRS = {"position", "velocity", "mass", "radius"}
 
+DOMAIN_SHORT = {
+    "POINT": "pt",
+    "EDGE": "edge",
+    "FACE": "face",
+    "CORNER": "corner",
+    "CURVE": "curve",
+    "INSTANCE": "inst",
+}
+TYPE_SHORT = {
+    "FLOAT": "float",
+    "INT": "int",
+    "FLOAT_VECTOR": "vec3",
+    "FLOAT_COLOR": "color",
+    "BYTE_COLOR": "color",
+    "BOOLEAN": "bool",
+    "FLOAT2": "vec2",
+    "INT32_2D": "int2",
+    "QUATERNION": "quat",
+    "FLOAT4X4": "mat4",
+    "INT8": "int8",
+}
+
 
 def draw_geometry_info(
     layout: UILayout, obj: bpy.types.Object, context: bpy.types.Context
@@ -23,66 +45,32 @@ def draw_geometry_info(
     box = layout.box()
     col = box.column(align=True)
 
-    obj_type = eval_obj.type
-    col.label(
-        text=f"Type: {obj_type}",
-        icon="MESH_DATA" if obj_type == "MESH" else "POINTCLOUD",
-    )
-
     data = eval_obj.data
     if data is None:
         col.label(text="No data", icon="ERROR")
         return
 
-    # Point / vertex count
-    if obj_type == "MESH":
-        mesh = data
-        vert_count = len(mesh.vertices)
-        face_count = len(mesh.polygons)
-        col.label(text=f"Vertices: {vert_count:,}")
-        col.label(text=f"Faces: {face_count:,}")
-    elif obj_type == "POINTCLOUD":
-        pt_count = len(data.points)
-        col.label(text=f"Points: {pt_count:,}")
-    elif obj_type == "CURVES":
-        curve_count = len(data.curves)
-        pt_count = len(data.points)
-        col.label(text=f"Curves: {curve_count:,}  Points: {pt_count:,}")
-
-    # Named attributes
-    try:
-        attrs = data.attributes
-    except AttributeError:
+    if isinstance(data, bpy.types.Mesh):
+        col.label(text=f"Vertices: {len(data.vertices):,}", icon="MESH_DATA")
+        col.label(text=f"Faces: {len(data.polygons):,}")
+    elif isinstance(data, bpy.types.PointCloud):
+        col.label(text=f"Points: {len(data.points):,}", icon="POINTCLOUD_DATA")
+    elif isinstance(data, bpy.types.Curves):
+        col.label(text=f"Curves: {len(data.curves):,}  Points: {len(data.points):,}", icon="CURVES_DATA")
+    else:
+        col.label(text=f"Type: {eval_obj.type}", icon="QUESTION")
         return
 
+    # Named attributes — only Mesh / PointCloud / Curves carry them
+    if not isinstance(data, (bpy.types.Mesh, bpy.types.PointCloud, bpy.types.Curves)):
+        return
+
+    attrs = data.attributes
     if not attrs:
         return
 
     col.separator()
     col.label(text="Attributes:")
-
-    DOMAIN_SHORT = {
-        "POINT": "pt",
-        "EDGE": "edge",
-        "FACE": "face",
-        "CORNER": "corner",
-        "CURVE": "curve",
-        "INSTANCE": "inst",
-    }
-    TYPE_SHORT = {
-        "FLOAT": "float",
-        "INT": "int",
-        "FLOAT_VECTOR": "vec3",
-        "FLOAT_COLOR": "color",
-        "BYTE_COLOR": "color",
-        "BOOLEAN": "bool",
-        "FLOAT2": "vec2",
-        "INT32_2D": "int2",
-        "QUATERNION": "quat",
-        "FLOAT4X4": "mat4",
-        "INT8": "int8",
-    }
-
     for attr in attrs:
         domain = DOMAIN_SHORT.get(attr.domain, attr.domain)
         dtype = TYPE_SHORT.get(attr.data_type, attr.data_type)
@@ -127,12 +115,11 @@ class WB_PT_WarblerPanel(Panel):
     bl_region_type = "UI"
 
     def draw(self, context):
-        layout: UILayout = self.layout
+        layout = self.layout
         assert layout is not None and context is not None
         man = get_manager(context)
         sprops: WarblerSceneProperties = context.scene.wb
         layout.label(text="Simulation Settings")
-        # obj = context.active_object
 
         layout.prop(context.scene.render, "fps")
 

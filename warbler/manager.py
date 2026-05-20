@@ -3,6 +3,7 @@ import bpy
 from bpy.types import Context, Scene
 from bpy.app.handlers import persistent
 from . import props
+from .utils import get_scene
 
 
 class SimulationManager:
@@ -11,7 +12,7 @@ class SimulationManager:
 
     @property
     def scene(self) -> Scene:
-        return bpy.context.scene
+        return get_scene()
 
     @property
     def wb_props(self) -> props.WarblerSceneProperties:
@@ -68,12 +69,12 @@ def get_manager(context: Context | None) -> SimulationManager:
     return context.scene.SimulationManager  # type: ignore
 
 
-def update_simulations(scene: bpy.types.Scene) -> None:
+def update_simulations(scene: Scene) -> None:
     if hasattr(scene, "SimulationManager"):
         manager: SimulationManager = scene.SimulationManager  # type: ignore
         manager.step_simulations()
 
 
 @persistent
-def _step_simulations(self, context: bpy.types.Context) -> None:
-    update_simulations(context.scene)
+def _step_simulations(scene: bpy.types.Scene, depsgraph: bpy.types.Depsgraph) -> None:
+    update_simulations(scene)

@@ -57,7 +57,7 @@ class WB_OT_CompileSimulation(BaseOperator):
             man.active_simulation.compile()
         except Exception as e:
             self.report(
-                ReportValues.ERROR,
+                ReportValues.ERROR,  # type: ignore
                 "Unable to compile simulation, error: {}".format(e),
             )
         return ReturnValues.FINISHED

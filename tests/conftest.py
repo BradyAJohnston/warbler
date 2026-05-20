@@ -4,11 +4,11 @@ import sys
 import bpy
 import pytest
 
-
 import warbler
 from warbler import manager as mgr
 from warbler.simulation import SimulatorXPBD
 from warbler.manager import get_manager
+from warbler.utils import get_scene
 
 CURRENT = Path(__file__).parent
 PROJECT = CURRENT.parent
@@ -25,7 +25,7 @@ def clean_and_save(request):
     bpy.ops.wm.read_homefile(app_template="")
 
     # Fresh SimulationManager so each test starts with no simulations
-    bpy.types.Scene.SimulationManager = mgr.SimulationManager()
+    bpy.types.Scene.SimulationManager = mgr.SimulationManager()  # type: ignore
 
     yield
 
@@ -43,7 +43,7 @@ def rigid_simulation():
     cube.wb.sim_shape = "CUBE"
 
     coll = bpy.data.collections.new("Rigid")
-    bpy.context.scene.collection.children.link(coll)
+    get_scene().collection.children.link(coll)
     coll.objects.link(cube)
 
     man = get_manager(bpy.context)

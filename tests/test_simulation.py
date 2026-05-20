@@ -1,13 +1,15 @@
 import bpy
+import numpy as np
 import pytest
 
 from warbler.manager import get_manager
 from warbler.simulation import SimulatorXPBD
+from warbler.utils import get_scene
 
 
 def _make_rigid_collection(name: str = "Rigid") -> bpy.types.Collection:
     coll = bpy.data.collections.new(name)
-    bpy.context.scene.collection.children.link(coll)
+    get_scene().collection.children.link(coll)
     return coll
 
 

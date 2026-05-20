@@ -4,6 +4,13 @@ from mathutils import Quaternion
 import warp as wp
 
 
+def get_scene() -> bpy.types.Scene:
+    """Return the current Blender scene, asserting it is not None."""
+    scene = bpy.context.scene
+    assert scene is not None, "bpy.context.scene is None"
+    return scene
+
+
 def quat_to_blender(quat: np.ndarray) -> list[float]:
     return [quat[3], quat[0], quat[1], quat[2]]
 
@@ -22,7 +29,7 @@ def wp_location(obj: bpy.types.Object) -> wp.vec3:
 
 def wp_transform(obj: bpy.types.Object | None = None) -> wp.transform:
     if obj is None:
-        return wp.transform(wp.vec3(0, 0, 0), wp.quat_identity(float))
+        return wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat(0.0, 0.0, 0.0, 1.0))
     return wp.transform(wp_location(obj), wp_rotation(obj))
 
 
@@ -34,5 +41,6 @@ def smooth_lerp(a, b, decay: int = 5) -> np.ndarray:
     return b + (a - b) * (1 - np.exp(-decay * delta_t()))
 
 
-def delta_t():
-    return 1 / bpy.context.scene.render.fps / bpy.context.scene.render.fps_base
+def delta_t() -> float:
+    scene = get_scene()
+    return 1 / scene.render.fps / scene.render.fps_base

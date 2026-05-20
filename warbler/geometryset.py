@@ -3,16 +3,21 @@ from bpy.types import Object, Context, Depsgraph
 import bpy
 import numpy as np
 
+# Geometry data types that carry named attributes
+_GEOM_TYPES = (bpy.types.Mesh, bpy.types.PointCloud, bpy.types.Curves)
+
 
 class GeometryAttributes:
     """Wraps the evaluated data of any geometry object (Mesh, PointCloud, Curves)."""
 
-    def __init__(self, data):
+    def __init__(self, data: bpy.types.Mesh | bpy.types.PointCloud | bpy.types.Curves | None):
         self._data = data
 
     @property
     def attributes(self):
-        return self._data.attributes if self._data is not None else None
+        if self._data is None:
+            return None
+        return self._data.attributes
 
     def to_props(self) -> dict[str, np.ndarray]:
         """Return the subset of attributes warbler knows how to use as particle inputs."""
@@ -24,6 +29,15 @@ class GeometryAttributes:
             for name in ["position", "velocity", "mass", "radius"]
             if name in attrs
         }
+
+
+def _as_geom_data(
+    data: object,
+) -> bpy.types.Mesh | bpy.types.PointCloud | bpy.types.Curves | None:
+    """Narrow an Object.data value to one of the geometry types that carry attributes."""
+    if isinstance(data, (bpy.types.Mesh, bpy.types.PointCloud, bpy.types.Curves)):
+        return data
+    return None
 
 
 class GeometrySet:
@@ -38,16 +52,16 @@ class GeometrySet:
         return self.eval_obj.type
 
     @property
-    def data(self):
-        return self.eval_obj.data
+    def data(self) -> bpy.types.Mesh | bpy.types.PointCloud | bpy.types.Curves | None:
+        return _as_geom_data(self.eval_obj.data)
 
     @property
     def pointcloud(self) -> GeometryAttributes:
         """Return attributes from whatever geometry type the source uses."""
-        return GeometryAttributes(self.eval_obj.data)
+        return GeometryAttributes(self.data)
 
     def _get_point_count(self) -> int:
-        data = self.eval_obj.data
+        data = self.data
         if data is None:
             return 0
         if "position" in data.attributes:
