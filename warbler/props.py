@@ -176,10 +176,10 @@ class WarblerObjectProperties(PropertyGroup):
         description="Restitution (bounciness) coefficient for contacts, used by XPBD",
         default=0.0,
     )
-    rigid_thickness: FloatProperty(  # type: ignore
-        name="Collision Thickness",
-        description="The thickness of the shape used for collision detection",
-        default=1e-5,
+    rigid_margin: FloatProperty(  # type: ignore
+        name="Collision Margin",
+        description="Contact margin around the shape used for collision detection",
+        default=0.0,
     )
 
 

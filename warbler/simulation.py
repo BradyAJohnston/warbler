@@ -157,9 +157,11 @@ class SimulatorXPBD(SimulatorBase):
             iterations=self.substeps,
         )
         self.control = self.model.control()
+        self.contacts = self.model.contacts()
         if self.props.is_compiled:
             bpy.data.objects.remove(self.particle_object.object)
-        self.create_pointcloud()
+        if self.model.particle_count > 0:
+            self.create_pointcloud()
 
     def _add_rigid_bodies(self, objects: list[bpy.types.Object]):
         """Add Blender objects as rigid bodies to the model."""
@@ -306,23 +308,12 @@ class SimulatorXPBD(SimulatorBase):
         """Execute one physics timestep following Newton's pattern:
         State → Solver → Updated State
         """
-        # Prepare state for simulation
-        self.state_0.clear_forces()
-        self.model.particle_grid.build(self.state_0.particle_q, self.search_radius)
-        # Store manual body transforms before solving
-        # manual_body_transforms = self._get_manual_body_transforms()
-
-        # Run solver (State → Solver → Updated State)
-        contacts = self.model.collide(self.state_0)
-        self.solver.step(
-            self.state_0, self.state_1, self.control, contacts, self.frame_dt
-        )
-
-        # Restore manual bodies (kinematic constraint)
-        # self._restore_manual_body_transforms(manual_body_transforms)
-
-        # Swap double-buffered states
-        self.state_0, self.state_1 = self.state_1, self.state_0
+        sim_dt = self.frame_dt / self.substeps
+        for _ in range(self.substeps):
+            self.state_0.clear_forces()
+            self.model.collide(self.state_0, self.contacts)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sim_dt)
+            self.state_0, self.state_1 = self.state_1, self.state_0
 
     # def _get_manual_body_transforms(self) -> dict[int, np.ndarray]:
     #     """Get transforms of manually-controlled bodies before physics solve."""
@@ -392,6 +383,7 @@ class SimulatorXPBD(SimulatorBase):
         self.props.time_compute = time.time() - start_simulate
         start_sync = time.time()
         self._update_blender_from_simulation()
-        self._update_particle_visualization()
+        if self.model.particle_count > 0:
+            self._update_particle_visualization()
         self.props.time_sync = time.time() - start_sync
         self.clock += 1

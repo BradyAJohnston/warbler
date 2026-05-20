@@ -22,7 +22,7 @@ license = [
 
 wheels = [
 	"./wheels/databpy-0.7.0-py3-none-any.whl",
-	"./wheels/newton-1.1.0-py3-none-any.whl",
+	"./wheels/newton-1.2.0-py3-none-any.whl",
 	"./wheels/warp_lang-1.13.0-py3-none-manylinux_2_28_x86_64.whl",
 ]
 
