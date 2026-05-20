@@ -147,7 +147,9 @@ class SimulatorXPBD(SimulatorBase):
 
         if self.props.particle_source is not None:
             geo = GeometrySet(self.props.particle_source)
-            self._add_particles(**geo.pointcloud.to_props())
+            props = geo.pointcloud.to_props()
+            if len(props.get("position", [])) > 0:
+                self._add_particles(**props)
 
     def finalize(self):
         self.model: newton.Model = self.builder.finalize(device=self.device)
@@ -191,6 +193,8 @@ class SimulatorXPBD(SimulatorBase):
         mass: np.ndarray | None = None,
         radius: np.ndarray | None = None,
     ) -> None:
+        if len(position) == 0:
+            return
         if velocity is None:
             velocity = np.zeros(position.shape, dtype=float)
         if mass is None:
@@ -198,7 +202,7 @@ class SimulatorXPBD(SimulatorBase):
         if radius is None:
             radius = np.repeat(0.1, position.shape[0])
 
-        self.search_radius = max(radius) * 2
+        self.search_radius = float(np.max(radius)) * 2
 
         self.builder.add_particles(
             pos=position,  # type: ignore

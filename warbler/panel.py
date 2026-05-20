@@ -56,7 +56,10 @@ def draw_geometry_info(
     elif isinstance(data, bpy.types.PointCloud):
         col.label(text=f"Points: {len(data.points):,}", icon="POINTCLOUD_DATA")
     elif isinstance(data, bpy.types.Curves):
-        col.label(text=f"Curves: {len(data.curves):,}  Points: {len(data.points):,}", icon="CURVES_DATA")
+        col.label(
+            text=f"Curves: {len(data.curves):,}  Points: {len(data.points):,}",
+            icon="CURVES_DATA",
+        )
     else:
         col.label(text=f"Type: {eval_obj.type}", icon="QUESTION")
         return

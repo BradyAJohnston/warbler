@@ -24,7 +24,8 @@ dev = [
     "scipy",
     "ruff",
     "ty>=0.0.34",
-    "urllib3>=2.6.3"
+    "urllib3>=2.6.3",
+    "pre-commit",
 ]
 docs = ["quartodoc", "quarto-cli>=1.9", "tomlkit"]
 

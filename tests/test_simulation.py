@@ -1,5 +1,4 @@
 import bpy
-import numpy as np
 import pytest
 
 from warbler.manager import get_manager

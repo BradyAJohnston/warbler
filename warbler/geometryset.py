@@ -10,7 +10,9 @@ _GEOM_TYPES = (bpy.types.Mesh, bpy.types.PointCloud, bpy.types.Curves)
 class GeometryAttributes:
     """Wraps the evaluated data of any geometry object (Mesh, PointCloud, Curves)."""
 
-    def __init__(self, data: bpy.types.Mesh | bpy.types.PointCloud | bpy.types.Curves | None):
+    def __init__(
+        self, data: bpy.types.Mesh | bpy.types.PointCloud | bpy.types.Curves | None
+    ):
         self._data = data
 
     @property
@@ -34,7 +36,7 @@ class GeometryAttributes:
 def _as_geom_data(
     data: object,
 ) -> bpy.types.Mesh | bpy.types.PointCloud | bpy.types.Curves | None:
-    """Narrow an Object.data value to one of the geometry types that carry attributes."""
+    """Narrow a data value to one of the geometry types that carry attributes."""
     if isinstance(data, (bpy.types.Mesh, bpy.types.PointCloud, bpy.types.Curves)):
         return data
     return None
@@ -47,12 +49,36 @@ class GeometrySet:
         depsgraph: Depsgraph = ctx.evaluated_depsgraph_get()
         self.eval_obj = obj.evaluated_get(depsgraph)
 
+        # Keep _eval_geom alive on the instance — the data blocks returned by
+        # geom.pointcloud / geom.mesh are owned by this object and will be freed
+        # if it goes out of scope.
+        try:
+            self._eval_geom = self.eval_obj.evaluated_geometry()  # type: ignore[attr-defined]
+        except AttributeError:
+            self._eval_geom = None
+
     @property
     def obj_type(self) -> str:
         return self.eval_obj.type
 
     @property
     def data(self) -> bpy.types.Mesh | bpy.types.PointCloud | bpy.types.Curves | None:
+        """Return the best geometry data for reading particle attributes.
+
+        Checks GN-evaluated output first (pointcloud > curves > mesh) so that a
+        mesh object whose GN tree outputs points is read correctly. Falls back to
+        the object's base data block for plain objects without GN modifiers.
+        """
+        if self._eval_geom is not None:
+            for component in (
+                self._eval_geom.pointcloud,  # type: ignore[attr-defined]
+                self._eval_geom.curves,  # type: ignore[attr-defined]
+                self._eval_geom.mesh,  # type: ignore[attr-defined]
+            ):
+                data = _as_geom_data(component)
+                if data is not None:
+                    return data
+
         return _as_geom_data(self.eval_obj.data)
 
     @property
