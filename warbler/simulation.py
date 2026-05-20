@@ -7,7 +7,6 @@ import numpy as np
 import databpy as db
 from .utils import (
     get_scene,
-    smooth_lerp,
     blender_rotation,
     wp_transform,
 )
@@ -123,6 +122,7 @@ class SimulatorXPBD(SimulatorBase):
         self.clock: int = 0
         self.bob: db.BlenderObject | None = None
         self.search_radius = 1.0
+        self._pinned_indices: np.ndarray | None = None
 
     def _compile(self) -> None:
         if self.props.is_compiled:
@@ -172,7 +172,11 @@ class SimulatorXPBD(SimulatorBase):
         """Add Blender objects as rigid bodies to the model."""
         for obj in objects:
             rig = rigid.RigidObject(obj)
-            body = self.builder.add_body(mass=1e5, xform=rig.wp_transform())
+            body = self.builder.add_body(
+                mass=1e5,
+                xform=rig.wp_transform(),
+                is_kinematic=not rig.is_active,
+            )
 
             if obj.wb.sim_shape == "CUBE":  # type: ignore
                 obj.wb.sim_body_index = self.builder.add_shape_box(  # type: ignore
@@ -192,15 +196,26 @@ class SimulatorXPBD(SimulatorBase):
         velocity: np.ndarray | None = None,
         mass: np.ndarray | None = None,
         radius: np.ndarray | None = None,
+        pinned: np.ndarray | None = None,
     ) -> None:
         if len(position) == 0:
             return
+        n = position.shape[0]
         if velocity is None:
             velocity = np.zeros(position.shape, dtype=float)
         if mass is None:
-            mass = np.repeat(1.0, position.shape[0])
+            mass = np.repeat(1.0, n)
         if radius is None:
-            radius = np.repeat(0.1, position.shape[0])
+            radius = np.repeat(0.1, n)
+
+        # Build per-particle flags: pinned → 0 (kinematic), otherwise ACTIVE.
+        active_flag = int(newton.ParticleFlags.ACTIVE)
+        if pinned is not None and pinned.any():
+            flags = np.where(pinned, 0, active_flag).tolist()
+            self._pinned_indices = np.where(pinned)[0]
+        else:
+            flags = [active_flag] * n
+            self._pinned_indices = None
 
         self.search_radius = float(np.max(radius)) * 2
 
@@ -209,6 +224,7 @@ class SimulatorXPBD(SimulatorBase):
             vel=velocity,  # type: ignore
             mass=mass,  # type: ignore
             radius=radius,  # type: ignore
+            flags=flags,
         )
 
     def _add_springs(self):
@@ -247,7 +263,7 @@ class SimulatorXPBD(SimulatorBase):
             rig = rigid.RigidObject(obj)
 
             if not rig.is_active:
-                transform = self._get_manual_body_transform(
+                transform = self._get_kinematic_body_transform(
                     obj, current_sim_transforms[i], body_velocities, i
                 )
             else:
@@ -262,34 +278,55 @@ class SimulatorXPBD(SimulatorBase):
         if body_velocities is not None and self.state_0.body_qd is not None:
             self.state_0.body_qd.assign(body_velocities)
 
-    def _get_manual_body_transform(
+        self._update_pinned_particles()
+
+    def _update_pinned_particles(self) -> None:
+        """Re-read pinned particle positions from the GN source each frame.
+
+        Because particle_q_init is cloned from state_in.particle_q at the start
+        of every solver.step(), writing updated positions here propagates
+        animated pin targets into the simulation automatically.
+        """
+        if (
+            self._pinned_indices is None
+            or len(self._pinned_indices) == 0
+            or self.props.particle_source is None
+            or self.state_0.particle_q is None
+        ):
+            return
+
+        geo = GeometrySet(self.props.particle_source)
+        props = geo.pointcloud.to_props()
+        if "position" not in props:
+            return
+
+        new_positions = props["position"]
+        if len(new_positions) != self.model.particle_count:
+            return
+
+        all_q = self.state_0.particle_q.numpy()
+        all_q[self._pinned_indices] = new_positions[self._pinned_indices]
+        self.state_0.particle_q.assign(all_q)
+
+    def _get_kinematic_body_transform(
         self,
         obj: bpy.types.Object,
         current_sim_transform: np.ndarray,
         body_velocities: np.ndarray | None,
         body_index: int,
     ) -> wp.transform:
-        """Calculate transform for manually-controlled body with smoothing.
+        """Return the transform for a kinematic (user-controlled) rigid body.
 
-        Manually-controlled bodies follow Blender positions but are smoothed
-        to avoid jarring movements. Their velocity is calculated to push particles
-        but then zeroed to prevent self-movement.
+        The body is marked is_kinematic in Newton so the solver never applies
+        forces to it. We still write velocity into body_qd so Newton can
+        generate correct collision impulses on particles the body sweeps through.
         """
         rot = blender_rotation(obj.rotation_quaternion)
         loc = np.array(obj.location)
 
-        # Apply smoothing (except first frame)
-        if self.clock != 0:
-            loc = smooth_lerp(
-                current_sim_transform[0:3],
-                loc,
-                self.props.rigid_decay_frames,
-            )
-
-            # Calculate velocity for particle interaction
-            if body_velocities is not None:
-                velocity = (loc - current_sim_transform[0:3]) / self.frame_dt
-                body_velocities[body_index, 0:3] = velocity
+        if self.clock != 0 and body_velocities is not None:
+            velocity = (loc - current_sim_transform[0:3]) / self.frame_dt
+            body_velocities[body_index, 0:3] = velocity
 
         return wp.transform(wp.vec3(*loc), wp.quat(*rot))
 
