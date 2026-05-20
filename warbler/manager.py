@@ -18,7 +18,7 @@ class SimulationManager:
         return props.scene_properties(bpy.context)
 
     @property
-    def sim_items(self) -> bpy.types.bpy_prop_collection_idprop:  ## type: ignore
+    def sim_items(self) -> bpy.types.bpy_prop_collection_idprop:  #
         return self.scene.wb.sim_list  # type: ignore
 
     @property

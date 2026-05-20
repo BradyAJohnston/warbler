@@ -34,7 +34,7 @@ class SimulationListItem(bpy.types.PropertyGroup):
     ground_plane_vector: FloatVectorProperty("Ground Normal", default=(0, 0, 1))  # type: ignore
 
     sim_rigid_collection: PointerProperty(  # type: ignore
-        type=bpy.types.Collection,  # type: ignore
+        type=bpy.types.Collection,
         name="Collection",
         description="Collection of objects that will be used as rigid bodies in the simulation.",
     )
@@ -60,7 +60,7 @@ class SimulationListItem(bpy.types.PropertyGroup):
         default=1.0,
     )
     particle_source: PointerProperty(  # type: ignore
-        type=Object,  # type: ignore
+        type=Object,
         name="Particle Source",
         description="Source simulation particles from this object",
     )

@@ -24,7 +24,7 @@ def unregister():
     for cls in CLASSES:
         unregister_class(cls)
     del bpy.types.Scene.SimulationManager  # type: ignore
-    # del bpy.types.Scene.wb_sim_list  # type: ignore
+    # del bpy.types.Scene.wb_sim_list
     del bpy.types.Object.wb  # type: ignore
     try:
         frame_change_post.remove(manager._step_simulations)

@@ -4,3 +4,4 @@
 *.pyc
 /docs/_site
 /docs/_build
+/tests/blend_files/

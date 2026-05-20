@@ -5,6 +5,91 @@ from .manager import get_manager
 from .ops import WB_OT_AddSimulation, WB_OT_CompileSimulation, WB_OT_RemoveSimulation
 from .props import WarblerObjectProperties, WarblerSceneProperties
 
+# Attributes warbler knows how to map into a simulation
+_KNOWN_PARTICLE_ATTRS = {"position", "velocity", "mass", "radius"}
+
+
+def draw_geometry_info(
+    layout: UILayout, obj: bpy.types.Object, context: bpy.types.Context
+) -> None:
+    """Draw a read-only summary of an object's evaluated geometry."""
+    try:
+        depsgraph = context.evaluated_depsgraph_get()
+        eval_obj = obj.evaluated_get(depsgraph)
+    except Exception:
+        layout.label(text="Could not evaluate geometry", icon="ERROR")
+        return
+
+    box = layout.box()
+    col = box.column(align=True)
+
+    obj_type = eval_obj.type
+    col.label(
+        text=f"Type: {obj_type}",
+        icon="MESH_DATA" if obj_type == "MESH" else "POINTCLOUD",
+    )
+
+    data = eval_obj.data
+    if data is None:
+        col.label(text="No data", icon="ERROR")
+        return
+
+    # Point / vertex count
+    if obj_type == "MESH":
+        mesh = data
+        vert_count = len(mesh.vertices)
+        face_count = len(mesh.polygons)
+        col.label(text=f"Vertices: {vert_count:,}")
+        col.label(text=f"Faces: {face_count:,}")
+    elif obj_type == "POINTCLOUD":
+        pt_count = len(data.points)
+        col.label(text=f"Points: {pt_count:,}")
+    elif obj_type == "CURVES":
+        curve_count = len(data.curves)
+        pt_count = len(data.points)
+        col.label(text=f"Curves: {curve_count:,}  Points: {pt_count:,}")
+
+    # Named attributes
+    try:
+        attrs = data.attributes
+    except AttributeError:
+        return
+
+    if not attrs:
+        return
+
+    col.separator()
+    col.label(text="Attributes:")
+
+    DOMAIN_SHORT = {
+        "POINT": "pt",
+        "EDGE": "edge",
+        "FACE": "face",
+        "CORNER": "corner",
+        "CURVE": "curve",
+        "INSTANCE": "inst",
+    }
+    TYPE_SHORT = {
+        "FLOAT": "float",
+        "INT": "int",
+        "FLOAT_VECTOR": "vec3",
+        "FLOAT_COLOR": "color",
+        "BYTE_COLOR": "color",
+        "BOOLEAN": "bool",
+        "FLOAT2": "vec2",
+        "INT32_2D": "int2",
+        "QUATERNION": "quat",
+        "FLOAT4X4": "mat4",
+        "INT8": "int8",
+    }
+
+    for attr in attrs:
+        domain = DOMAIN_SHORT.get(attr.domain, attr.domain)
+        dtype = TYPE_SHORT.get(attr.data_type, attr.data_type)
+        known = attr.name in _KNOWN_PARTICLE_ATTRS
+        icon = "CHECKMARK" if known else "DOT"
+        col.label(text=f"  {attr.name}  ({dtype}, {domain})", icon=icon)
+
 
 def create_panel(
     layout: UILayout, idname: str | None = None, default_closed: bool = False
@@ -45,7 +130,7 @@ class WB_PT_WarblerPanel(Panel):
         layout: UILayout = self.layout
         assert layout is not None and context is not None
         man = get_manager(context)
-        sprops: WarblerSceneProperties = context.scene.wb  # type: ignore
+        sprops: WarblerSceneProperties = context.scene.wb
         layout.label(text="Simulation Settings")
         # obj = context.active_object
 
@@ -101,6 +186,9 @@ class WB_PT_WarblerPanel(Panel):
         if panel:
             col = panel.column()
             col.prop(item, "particle_source", text="Source")
+
+            if item.particle_source is not None:
+                draw_geometry_info(col, item.particle_source, context)
 
             header, panel = create_panel(panel, "spring")
             if header:

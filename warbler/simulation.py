@@ -106,6 +106,8 @@ class SimulatorXPBD(SimulatorBase):
 
     @property
     def objects(self) -> list[Object]:
+        if self.props.sim_rigid_collection is None:
+            return []
         return [o for o in self.props.sim_rigid_collection.objects]
 
     # ============================================================================
@@ -312,7 +314,9 @@ class SimulatorXPBD(SimulatorBase):
         for _ in range(self.substeps):
             self.state_0.clear_forces()
             self.model.collide(self.state_0, self.contacts)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sim_dt)
+            self.solver.step(
+                self.state_0, self.state_1, self.control, self.contacts, sim_dt
+            )
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     # def _get_manual_body_transforms(self) -> dict[int, np.ndarray]:

@@ -31,7 +31,7 @@ class BaseOperator(Operator):
     def manager(self, context: Context):
         return get_manager(context)
 
-    def execute(self, context: Context):  # type: ignore
+    def execute(self, context: Context):
         return self.RETURN.FINISHED
 
 
