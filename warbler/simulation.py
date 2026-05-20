@@ -123,6 +123,10 @@ class SimulatorXPBD(SimulatorBase):
         self.bob: db.BlenderObject | None = None
         self.search_radius = 1.0
         self._pinned_indices: np.ndarray | None = None
+        self._cloth_particle_start: int = 0
+        self._cloth_particle_count: int = 0
+        self._cloth_faces: np.ndarray | None = None
+        self.cloth_object: db.BlenderObject | None = None
 
     def _compile(self) -> None:
         if self.props.is_compiled:
@@ -151,6 +155,9 @@ class SimulatorXPBD(SimulatorBase):
             if len(props.get("position", [])) > 0:
                 self._add_particles(**props)
 
+        if self.props.cloth_source is not None:
+            self._add_cloth(self.props.cloth_source)
+
     def finalize(self):
         self.model: newton.Model = self.builder.finalize(device=self.device)
 
@@ -165,8 +172,13 @@ class SimulatorXPBD(SimulatorBase):
         self.contacts = self.model.contacts()
         if self.props.is_compiled:
             bpy.data.objects.remove(self.particle_object.object)
+            if self.cloth_object is not None:
+                bpy.data.objects.remove(self.cloth_object.object)
+                self.cloth_object = None
         if self.model.particle_count > 0:
             self.create_pointcloud()
+        if self._cloth_particle_count > 0:
+            self._create_cloth_mesh()
 
     def _add_rigid_bodies(self, objects: list[bpy.types.Object]):
         """Add Blender objects as rigid bodies to the model."""
@@ -230,6 +242,91 @@ class SimulatorXPBD(SimulatorBase):
     def _add_springs(self):
         """Add spring constraints between consecutive particles."""
         pass
+
+    def _add_cloth(self, obj: bpy.types.Object) -> None:
+        """Add a Blender mesh as a cloth simulation."""
+        geo = GeometrySet(obj)
+        data = geo.data
+        if not isinstance(data, bpy.types.Mesh):
+            print(
+                Warning(f"Cloth source {obj.name} does not resolve to a mesh, skipping")
+            )
+            return
+
+        mat = obj.matrix_world
+        vertices = [tuple(mat @ v.co) for v in data.vertices]  # type: ignore[operator]
+        if not vertices:
+            return
+
+        data.calc_loop_triangles()
+        indices: list[int] = []
+        for tri in data.loop_triangles:
+            indices.extend(tri.vertices)
+        if not indices:
+            return
+
+        # Store face connectivity (N, 3) for rebuilding the output mesh
+        self._cloth_faces = np.array(indices, dtype=np.int32).reshape(-1, 3)
+        self._cloth_particle_start = self.builder.particle_count
+        self._cloth_particle_count = len(vertices)
+
+        # Per-face attribute overrides from GN (fall back to panel values if absent)
+        attrs = data.attributes
+        tri_ke = self.props.cloth_tri_ke
+        tri_ka = self.props.cloth_tri_ka
+        tri_kd = self.props.cloth_tri_kd
+        edge_ke = self.props.cloth_edge_ke
+        edge_kd = self.props.cloth_edge_kd
+
+        self.builder.add_cloth_mesh(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat(0.0, 0.0, 0.0, 1.0),
+            scale=1.0,
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            vertices=vertices,  # type: ignore
+            indices=indices,
+            density=self.props.cloth_density,
+            tri_ke=tri_ke,
+            tri_ka=tri_ka,
+            tri_kd=tri_kd,
+            edge_ke=edge_ke,
+            edge_kd=edge_kd,
+        )
+
+        # Pin vertices whose 'pinned' attribute is True by zeroing their mass
+        if "pinned" in attrs:
+            pinned = db.Attribute(attrs["pinned"]).as_array().astype(bool)
+            for i, is_pinned in enumerate(pinned):
+                if is_pinned:
+                    self.builder.particle_mass[self._cloth_particle_start + i] = 0.0
+
+    def _create_cloth_mesh(self) -> None:
+        """Create a Blender mesh object that will display the simulated cloth."""
+        if self._cloth_faces is None or self.state_0.particle_q is None:
+            return
+        initial_positions = self.state_0.particle_q.numpy()[
+            self._cloth_particle_start : self._cloth_particle_start
+            + self._cloth_particle_count
+        ]
+        self.cloth_object = db.BlenderObject.from_mesh(
+            vertices=initial_positions,
+            faces=self._cloth_faces,
+            name="WarblerCloth",
+        )
+
+    def _update_cloth_visualization(self) -> None:
+        """Copy cloth vertex positions from simulation state back to the Blender mesh."""
+        if (
+            self.cloth_object is None
+            or self._cloth_particle_count == 0
+            or self.state_0.particle_q is None
+        ):
+            return
+        cloth_positions = self.state_0.particle_q.numpy()[
+            self._cloth_particle_start : self._cloth_particle_start
+            + self._cloth_particle_count
+        ]
+        self.cloth_object.position = cloth_positions
         # for i in range(self.num_particles):
         #     self.edges[i, :] = (i - 1, i)
         #     self.builder.add_spring(i - 1, i, 3, 0.0, 0)
@@ -431,5 +528,6 @@ class SimulatorXPBD(SimulatorBase):
         self._update_blender_from_simulation()
         if self.model.particle_count > 0:
             self._update_particle_visualization()
+        self._update_cloth_visualization()
         self.props.time_sync = time.time() - start_sync
         self.clock += 1

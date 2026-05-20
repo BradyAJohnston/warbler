@@ -69,6 +69,42 @@ class SimulationListItem(bpy.types.PropertyGroup):
         description="Evaluate the object and all modifiers first before sourcing the particles",
         default=True,
     )
+    cloth_source: PointerProperty(  # type: ignore
+        type=Object,
+        name="Cloth Source",
+        description="Mesh object to simulate as cloth",
+    )
+    cloth_density: FloatProperty(  # type: ignore
+        name="Density",
+        description="Mass per unit area (kg/m²)",
+        default=0.02,
+        min=1e-4,
+    )
+    cloth_tri_ke: FloatProperty(  # type: ignore
+        name="Stretch Stiffness",
+        description="Per-face stretch stiffness. Override per face with 'tri_ke' attribute",
+        default=1e3,
+    )
+    cloth_tri_ka: FloatProperty(  # type: ignore
+        name="Area Stiffness",
+        description="Per-face area preservation stiffness",
+        default=1e3,
+    )
+    cloth_tri_kd: FloatProperty(  # type: ignore
+        name="Stretch Damping",
+        description="Per-face stretch damping",
+        default=1e-1,
+    )
+    cloth_edge_ke: FloatProperty(  # type: ignore
+        name="Bending Stiffness",
+        description="Per-edge bending stiffness. Override per edge with 'edge_ke' attribute",
+        default=1e-1,
+    )
+    cloth_edge_kd: FloatProperty(  # type: ignore
+        name="Bending Damping",
+        description="Per-edge bending damping",
+        default=0.0,
+    )
     rigid_decay_frames: IntProperty(  # type: ignore
         name="Rigid Input Smoothing",
         description="Number of frames to move the inputs of the rigid body over",

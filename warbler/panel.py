@@ -1,12 +1,14 @@
 import bpy
 from bpy.types import Panel, UILayout
 
+from .geometryset import GeometrySet
 from .manager import get_manager
 from .ops import WB_OT_AddSimulation, WB_OT_CompileSimulation, WB_OT_RemoveSimulation
 from .props import WarblerObjectProperties, WarblerSceneProperties
 
 # Attributes warbler knows how to map into a simulation
-_KNOWN_PARTICLE_ATTRS = {"position", "velocity", "mass", "radius"}
+_KNOWN_PARTICLE_ATTRS = {"position", "velocity", "mass", "radius", "pinned"}
+_KNOWN_CLOTH_ATTRS = {"pinned", "tri_ke", "tri_ka", "tri_kd", "edge_ke", "edge_kd"}
 
 DOMAIN_SHORT = {
     "POINT": "pt",
@@ -32,40 +34,47 @@ TYPE_SHORT = {
 
 
 def draw_geometry_info(
-    layout: UILayout, obj: bpy.types.Object, context: bpy.types.Context
+    layout: UILayout,
+    obj: bpy.types.Object,
+    context: bpy.types.Context,
+    known_attrs: set[str] | None = None,
 ) -> None:
-    """Draw a read-only summary of an object's evaluated geometry."""
+    """Draw a read-only summary of an object's GN-evaluated geometry.
+
+    Uses GeometrySet so the displayed data matches exactly what warbler reads
+    at compile time (GN pointcloud output takes priority over base mesh).
+    """
+    if known_attrs is None:
+        known_attrs = _KNOWN_PARTICLE_ATTRS
+
     try:
-        depsgraph = context.evaluated_depsgraph_get()
-        eval_obj = obj.evaluated_get(depsgraph)
+        geo = GeometrySet(obj, context)
     except Exception:
         layout.label(text="Could not evaluate geometry", icon="ERROR")
+        return
+
+    data = geo.data
+    if data is None:
+        layout.label(text="No geometry data", icon="ERROR")
         return
 
     box = layout.box()
     col = box.column(align=True)
 
-    data = eval_obj.data
-    if data is None:
-        col.label(text="No data", icon="ERROR")
-        return
-
-    if isinstance(data, bpy.types.Mesh):
-        col.label(text=f"Vertices: {len(data.vertices):,}", icon="MESH_DATA")
+    if isinstance(data, bpy.types.PointCloud):
+        pt_count = geo._get_point_count()
+        col.label(text=f"Points: {pt_count:,}", icon="POINTCLOUD_DATA")
+    elif isinstance(data, bpy.types.Mesh):
+        pt_count = geo._get_point_count()
+        col.label(text=f"Vertices: {pt_count:,}", icon="MESH_DATA")
         col.label(text=f"Faces: {len(data.polygons):,}")
-    elif isinstance(data, bpy.types.PointCloud):
-        col.label(text=f"Points: {len(data.points):,}", icon="POINTCLOUD_DATA")
     elif isinstance(data, bpy.types.Curves):
         col.label(
-            text=f"Curves: {len(data.curves):,}  Points: {len(data.points):,}",
+            text=f"Curves: {len(data.curves):,}  Points: {geo._get_point_count():,}",
             icon="CURVES_DATA",
         )
     else:
-        col.label(text=f"Type: {eval_obj.type}", icon="QUESTION")
-        return
-
-    # Named attributes — only Mesh / PointCloud / Curves carry them
-    if not isinstance(data, (bpy.types.Mesh, bpy.types.PointCloud, bpy.types.Curves)):
+        col.label(text=f"Unsupported type: {geo.obj_type}", icon="QUESTION")
         return
 
     attrs = data.attributes
@@ -77,7 +86,7 @@ def draw_geometry_info(
     for attr in attrs:
         domain = DOMAIN_SHORT.get(attr.domain, attr.domain)
         dtype = TYPE_SHORT.get(attr.data_type, attr.data_type)
-        known = attr.name in _KNOWN_PARTICLE_ATTRS
+        known = attr.name in known_attrs
         icon = "CHECKMARK" if known else "DOT"
         col.label(text=f"  {attr.name}  ({dtype}, {domain})", icon=icon)
 
@@ -176,11 +185,15 @@ class WB_PT_WarblerPanel(Panel):
         if panel:
             col = panel.column()
             col.prop(item, "particle_source", text="Source")
-
             if item.particle_source is not None:
-                draw_geometry_info(col, item.particle_source, context)
+                draw_geometry_info(
+                    col,
+                    item.particle_source,
+                    context,
+                    known_attrs=_KNOWN_PARTICLE_ATTRS,
+                )
 
-            header, panel = create_panel(panel, "spring")
+            header, panel = create_panel(panel, "spring", default_closed=True)
             if header:
                 header.label(text="Springs")
             if panel:
@@ -189,11 +202,31 @@ class WB_PT_WarblerPanel(Panel):
                 col.prop(item, "spring_kd")
                 col.prop(item, "spring_kf")
 
+        header, panel = create_panel(layout, idname="cloth")
+        header.label(text="Cloth")
+        if panel:
+            col = panel.column()
+            col.prop(item, "cloth_source", text="Source")
+            if item.cloth_source is not None:
+                draw_geometry_info(
+                    col, item.cloth_source, context, known_attrs=_KNOWN_CLOTH_ATTRS
+                )
+            col.separator()
+            col.prop(item, "cloth_density")
+            sub = col.column(align=True)
+            sub.label(text="Stretch:")
+            sub.prop(item, "cloth_tri_ke", text="Stiffness")
+            sub.prop(item, "cloth_tri_ka", text="Area")
+            sub.prop(item, "cloth_tri_kd", text="Damping")
+            sub = col.column(align=True)
+            sub.label(text="Bending:")
+            sub.prop(item, "cloth_edge_ke", text="Stiffness")
+            sub.prop(item, "cloth_edge_kd", text="Damping")
+
         header, panel = create_panel(layout, idname="rigid_bodies")
         header.label(text="Rigid Bodies")
         if panel:
             col = panel.column()
-
             col.prop(item, "sim_rigid_collection")
             col.prop(item, "rigid_decay_frames")
             col.prop(item, "substeps")
