@@ -38,7 +38,7 @@ def _flat_grid(nx: int, ny: int, spacing: float = 0.1) -> bpy.types.Object:
 
 
 def _compile_cloth_sim(
-    cloth_obj: bpy.types.Object, device: str = "cpu"
+    cloth_obj: bpy.types.Object, device: str = "cpu", substeps: int = 10
 ) -> SimulatorXPBD:
     man = get_manager(bpy.context)
     sim = SimulatorXPBD()
@@ -47,7 +47,7 @@ def _compile_cloth_sim(
     item.cloth_source = cloth_obj
     item.device = device
     item.use_ground_plane = True
-    item.substeps = 3
+    item.substeps = substeps
     sim.compile()
     return sim
 
@@ -80,11 +80,12 @@ def test_cloth_particle_start_is_zero_without_particles():
 
 
 def test_cloth_creates_output_object():
-    """After compilation a WarblerCloth mesh object should exist in the scene."""
+    """After compilation cloth_object wraps the source mesh; no separate WarblerCloth."""
     cloth_obj = _flat_grid(4, 4)
     sim = _compile_cloth_sim(cloth_obj)
     assert sim.cloth_object is not None
-    assert bpy.data.objects.get("WarblerCloth") is not None
+    assert sim.cloth_object.object is cloth_obj
+    assert bpy.data.objects.get("WarblerCloth") is None
 
 
 def test_cloth_output_vertex_count_matches_source():
@@ -94,6 +95,113 @@ def test_cloth_output_vertex_count_matches_source():
     out_mesh = sim.cloth_object.object.data
     assert isinstance(out_mesh, bpy.types.Mesh)
     assert len(out_mesh.vertices) == 5 * 5
+
+
+def test_cloth_position_start_attribute():
+    """Source mesh should gain position_start storing the initial local positions."""
+    cloth_obj = _flat_grid(4, 4)
+    mesh = cloth_obj.data
+    assert isinstance(mesh, bpy.types.Mesh)
+    original = np.array([v.co for v in mesh.vertices], dtype=np.float32)
+
+    _compile_cloth_sim(cloth_obj)
+
+    assert "position_start" in mesh.attributes
+    stored = np.array(
+        [d.vector for d in mesh.attributes["position_start"].data],  # type: ignore[attr-defined]
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(stored, original, atol=1e-5)
+
+
+def test_cloth_default_plane_stable():
+    """A coarse 2x2m plane at z=1 should fall under gravity without exploding."""
+    bpy.ops.mesh.primitive_plane_add(size=2.0, location=(0, 0, 1.0))
+    plane = bpy.context.active_object
+    assert plane is not None
+
+    sim = _compile_cloth_sim(plane)
+
+    for _ in range(5):
+        sim.step()
+
+    assert sim.state_0.particle_q is not None
+    positions = sim.state_0.particle_q.numpy()[: sim._cloth_particle_count]
+    assert np.all(np.isfinite(positions)), "Cloth positions are NaN/inf"
+    mean_z = float(positions[:, 2].mean())
+    assert mean_z < 0.95, (
+        f"Cloth barely moved (z={mean_z:.4f}); particle_radius too large?"
+    )
+
+
+def test_cloth_cube_stable():
+    """A default Blender cube used as cloth should not explode after several frames.
+
+    spring_ke=1e3 requires substeps >= 8 at 30 fps (ke*dt^2 < ~0.025).
+    The default substeps=10 satisfies this.  Regression: earlier defaults caused
+    positions to reach ~3000 by frame 3.
+    """
+    bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0, 0, 2.0))
+    cube = bpy.context.active_object
+    assert cube is not None
+
+    sim = _compile_cloth_sim(cube)
+
+    assert sim._cloth_particle_count == 8
+    assert sim._cloth_faces is not None
+
+    for i in range(5):
+        sim.step()
+        assert sim.state_0.particle_q is not None
+        positions = sim.state_0.particle_q.numpy()[: sim._cloth_particle_count]
+        assert np.all(np.isfinite(positions)), f"Explosion at step {i + 1}"
+        assert np.max(np.abs(positions)) < 100.0, (
+            f"Positions unreasonably large at step {i + 1}: {np.max(np.abs(positions)):.2e}"
+        )
+
+
+def test_cloth_grid_ground_impact_stable():
+    """A fine grid dropped onto the ground must not explode on impact.
+
+    Regression: density-derived per-vertex mass (~1e-4 kg) made the XPBD
+    penalty-contact solve diverge to NaN on the first ground contact (~frame
+    15), independent of substeps or spring_ke. The cloth_mass_min floor keeps
+    contacts stable. Run past the impact frame at low substeps to catch it.
+    """
+    grid = _flat_grid(12, 12, spacing=0.1)
+    sim = _compile_cloth_sim(grid, substeps=2)
+
+    n = sim._cloth_particle_count
+    for i in range(40):
+        sim.step()
+        assert sim.state_0.particle_q is not None
+        positions = sim.state_0.particle_q.numpy()[:n]
+        assert np.all(np.isfinite(positions)), f"Explosion (NaN) at step {i + 1}"
+        assert np.max(np.abs(positions)) < 50.0, (
+            f"Positions diverged at step {i + 1}: {np.max(np.abs(positions)):.2e}"
+        )
+
+    # Cloth should have come to rest on the ground, not passed through or blown up.
+    assert sim.state_0.particle_q is not None
+    final_z = float(sim.state_0.particle_q.numpy()[:n, 2].mean())
+    assert -0.5 < final_z < 0.5, f"Cloth not resting near ground (z={final_z:.3f})"
+
+
+def test_cloth_writes_back_to_source():
+    """Stepping the simulation should update vertex positions on the source mesh."""
+    cloth_obj = _flat_grid(4, 4)
+    sim = _compile_cloth_sim(cloth_obj)
+    assert sim.cloth_object is not None
+
+    initial_z = float(sim.cloth_object.position[:, 2].mean())
+
+    for _ in range(10):
+        sim.step()
+
+    final_z = float(sim.cloth_object.position[:, 2].mean())
+    assert final_z < initial_z, (
+        "Source mesh vertices did not move after simulation steps"
+    )
 
 
 def test_cloth_faces_stored():

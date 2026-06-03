@@ -84,6 +84,8 @@ def draw_geometry_info(
     col.separator()
     col.label(text="Attributes:")
     for attr in attrs:
+        if attr.name.startswith("."):
+            continue
         domain = DOMAIN_SHORT.get(attr.domain, attr.domain)
         dtype = TYPE_SHORT.get(attr.data_type, attr.data_type)
         known = attr.name in known_attrs
@@ -123,8 +125,9 @@ class WB_UL_RigidBodyCollection(bpy.types.UIList):
 class WB_PT_WarblerPanel(Panel):
     bl_idname = "WB_PT_WarblerPanel"
     bl_label = "Warbler"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "physics"
 
     def draw(self, context):
         layout = self.layout
@@ -213,11 +216,14 @@ class WB_PT_WarblerPanel(Panel):
                 )
             col.separator()
             col.prop(item, "cloth_density")
+            col.prop(item, "cloth_mass_min")
+            # XPBD has no triangle constraint: stretch is enforced by edge
+            # springs (add_springs), so expose cloth_spring_* here. The
+            # cloth_tri_* props are ignored by the XPBD solver.
             sub = col.column(align=True)
-            sub.label(text="Stretch:")
-            sub.prop(item, "cloth_tri_ke", text="Stiffness")
-            sub.prop(item, "cloth_tri_ka", text="Area")
-            sub.prop(item, "cloth_tri_kd", text="Damping")
+            sub.label(text="Stretch (springs):")
+            sub.prop(item, "cloth_spring_ke", text="Stiffness")
+            sub.prop(item, "cloth_spring_kd", text="Damping")
             sub = col.column(align=True)
             sub.label(text="Bending:")
             sub.prop(item, "cloth_edge_ke", text="Stiffness")
@@ -230,6 +236,7 @@ class WB_PT_WarblerPanel(Panel):
             col.prop(item, "sim_rigid_collection")
             col.prop(item, "rigid_decay_frames")
             col.prop(item, "substeps")
+            col.prop(item, "iterations")
             col.prop(item, "is_active")
 
         row = layout.row()

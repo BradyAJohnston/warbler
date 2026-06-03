@@ -18,17 +18,28 @@ class SimulationListItem(bpy.types.PropertyGroup):
     time_sync: FloatProperty(name="Time", default=0.0)  # type: ignore
     is_active: BoolProperty(name="Active", default=True)  # type: ignore
     is_compiled: BoolProperty(name="Compiled", default=False)  # type: ignore
-    substeps: IntProperty(name="Substeps", default=5, min=0, soft_max=100)  # type: ignore
+    substeps: IntProperty(name="Substeps", default=10, min=1, soft_max=100)  # type: ignore
+    iterations: IntProperty(  # type: ignore
+        name="Solver Iterations",
+        description=(
+            "XPBD constraint-solve iterations per substep. Higher values make "
+            "springs/contacts stiffer and more convergent (Newton examples use 10). "
+            "Independent of substeps, which subdivide the frame timestep"
+        ),
+        default=10,
+        min=1,
+        soft_max=50,
+    )
     device: EnumProperty(  # type: ignore
         items=(
-            ("cuda", "CUDA", "Compile for the GPU and simulate using CUDA"),
+            ("cpu", "CPU", "Simulate on the CPU (safe default; no shared GPU context)"),
             (
-                "cpu",
-                "CPI",
-                "Compile for running on the CPU and not using CUDA on the GPU",
+                "cuda",
+                "CUDA",
+                "Simulate on the GPU via CUDA (faster, but a crash poisons the Blender CUDA context until restart)",
             ),
         ),
-        default="cuda",
+        default="cpu",
     )
     use_ground_plane: BoolProperty("Ground Plane", default=True)  # type: ignore
     ground_plane_vector: FloatVectorProperty("Ground Normal", default=(0, 0, 1))  # type: ignore
@@ -80,6 +91,48 @@ class SimulationListItem(bpy.types.PropertyGroup):
         default=0.02,
         min=1e-4,
     )
+    cloth_mass_min: FloatProperty(  # type: ignore
+        name="Min Vertex Mass",
+        description=(
+            "Lower bound on per-vertex mass (kg). density×area on a fine mesh "
+            "produces vertices light enough that penalty contacts diverge "
+            "(positions blow up to NaN on ground impact). This floor keeps the "
+            "contact solve stable regardless of mesh resolution. Set to 0 to disable"
+        ),
+        default=1e-3,
+        min=0.0,
+    )
+    cloth_particle_radius: FloatProperty(  # type: ignore
+        name="Collision Radius",
+        description="Collision sphere radius for cloth vertices",
+        default=0.0001,
+        min=1e-4,
+    )
+    cloth_spring_ke: FloatProperty(  # type: ignore
+        name="Spring Stiffness",
+        description="Edge spring stiffness for XPBD shape maintenance",
+        default=1e3,
+    )
+    cloth_spring_kd: FloatProperty(  # type: ignore
+        name="Spring Damping",
+        description="Edge spring damping",
+        default=1.0,
+    )
+    soft_contact_ke: FloatProperty(  # type: ignore
+        name="Contact Stiffness",
+        description="Stiffness of particle soft contacts (cloth vs ground/rigid bodies)",
+        default=1e2,
+    )
+    soft_contact_kd: FloatProperty(  # type: ignore
+        name="Contact Damping",
+        description="Damping of particle soft contacts",
+        default=1.0,
+    )
+    soft_contact_mu: FloatProperty(  # type: ignore
+        name="Contact Friction",
+        description="Friction coefficient for particle soft contacts",
+        default=0.5,
+    )
     cloth_tri_ke: FloatProperty(  # type: ignore
         name="Stretch Stiffness",
         description="Per-face stretch stiffness. Override per face with 'tri_ke' attribute",
@@ -98,7 +151,7 @@ class SimulationListItem(bpy.types.PropertyGroup):
     cloth_edge_ke: FloatProperty(  # type: ignore
         name="Bending Stiffness",
         description="Per-edge bending stiffness. Override per edge with 'edge_ke' attribute",
-        default=1e-1,
+        default=1e1,
     )
     cloth_edge_kd: FloatProperty(  # type: ignore
         name="Bending Damping",

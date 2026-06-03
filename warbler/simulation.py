@@ -127,6 +127,14 @@ class SimulatorXPBD(SimulatorBase):
         self._cloth_particle_count: int = 0
         self._cloth_faces: np.ndarray | None = None
         self.cloth_object: db.BlenderObject | None = None
+        self.particle_object: db.BlenderObject | None = None
+
+    @property
+    def _particle_only_count(self) -> int:
+        """Particles that are not cloth vertices."""
+        if self._cloth_particle_count > 0:
+            return self._cloth_particle_start
+        return self.model.particle_count
 
     def _compile(self) -> None:
         if self.props.is_compiled:
@@ -160,25 +168,41 @@ class SimulatorXPBD(SimulatorBase):
 
     def finalize(self):
         self.model: newton.Model = self.builder.finalize(device=self.device)
+        self.model.soft_contact_ke = self.props.soft_contact_ke
+        self.model.soft_contact_kd = self.props.soft_contact_kd
+        self.model.soft_contact_mu = self.props.soft_contact_mu
 
         self.state_0: newton.State = self.model.state()
         self.state_1: newton.State = self.model.state()
 
         self.solver = newton.solvers.SolverXPBD(
             model=self.model,
-            iterations=self.substeps,
+            iterations=self.props.iterations,
         )
         self.control = self.model.control()
         self.contacts = self.model.contacts()
         if self.props.is_compiled:
-            bpy.data.objects.remove(self.particle_object.object)
-            if self.cloth_object is not None:
-                bpy.data.objects.remove(self.cloth_object.object)
-                self.cloth_object = None
-        if self.model.particle_count > 0:
+            if self.particle_object is not None:
+                bpy.data.objects.remove(self.particle_object.object)
+                self.particle_object = None
+            self.cloth_object = None
+        if self._particle_only_count > 0:
             self.create_pointcloud()
         if self._cloth_particle_count > 0:
-            self._create_cloth_mesh()
+            src = self.props.cloth_source
+            if (
+                src is not None
+                and isinstance(src.data, bpy.types.Mesh)
+                and len(src.data.vertices) == self._cloth_particle_count
+            ):
+                self.cloth_object = db.BlenderObject(src)
+            else:
+                print(
+                    Warning(
+                        "Cloth source vertex count differs from evaluated mesh "
+                        "(topology-changing modifier?); write-back disabled."
+                    )
+                )
 
     def _add_rigid_bodies(self, objects: list[bpy.types.Object]):
         """Add Blender objects as rigid bodies to the model."""
@@ -265,12 +289,22 @@ class SimulatorXPBD(SimulatorBase):
         if not indices:
             return
 
-        # Store face connectivity (N, 3) for rebuilding the output mesh
         self._cloth_faces = np.array(indices, dtype=np.int32).reshape(-1, 3)
         self._cloth_particle_start = self.builder.particle_count
         self._cloth_particle_count = len(vertices)
 
-        # Per-face attribute overrides from GN (fall back to panel values if absent)
+        # Store initial local-space positions on the source mesh before simulation.
+        # Use src_mesh.vertices (base mesh) so the attribute size always matches.
+        src_mesh = obj.data
+        if isinstance(src_mesh, bpy.types.Mesh):
+            if "position_start" not in src_mesh.attributes:
+                src_mesh.attributes.new(
+                    name="position_start", type="FLOAT_VECTOR", domain="POINT"
+                )
+            ps_attr = src_mesh.attributes["position_start"]
+            for i, v in enumerate(src_mesh.vertices):
+                ps_attr.data[i].vector = v.co  # type: ignore[attr-defined]
+
         attrs = data.attributes
         tri_ke = self.props.cloth_tri_ke
         tri_ka = self.props.cloth_tri_ka
@@ -291,45 +325,56 @@ class SimulatorXPBD(SimulatorBase):
             tri_kd=tri_kd,
             edge_ke=edge_ke,
             edge_kd=edge_kd,
+            add_springs=True,
+            spring_ke=self.props.cloth_spring_ke,
+            spring_kd=self.props.cloth_spring_kd,
+            particle_radius=self.props.cloth_particle_radius,
         )
 
-        # Pin vertices whose 'pinned' attribute is True by zeroing their mass
+        # add_cloth_mesh derives per-vertex mass from density × surrounding
+        # triangle area. On a fine mesh this can be ~1e-4 kg, light enough that
+        # the XPBD penalty-contact solve produces position deltas scaled by a
+        # huge inverse mass and diverges to NaN on the first ground impact
+        # (independent of substeps/spring_ke). Clamp non-pinned cloth vertices
+        # to a minimum mass to keep contacts stable. Newton's own XPBD cloth
+        # examples sidestep this by using an explicit mass=0.1 per particle.
+        mass_min = self.props.cloth_mass_min
+        if mass_min > 0.0:
+            end = self._cloth_particle_start + self._cloth_particle_count
+            for idx in range(self._cloth_particle_start, end):
+                self.builder.particle_mass[idx] = max(
+                    self.builder.particle_mass[idx], mass_min
+                )
+
+        # Pin vertices: zero mass AND mark non-ACTIVE (kinematic) so XPBD springs
+        # don't divide by zero on the zero-mass particles.
         if "pinned" in attrs:
             pinned = db.Attribute(attrs["pinned"]).as_array().astype(bool)
             for i, is_pinned in enumerate(pinned):
                 if is_pinned:
-                    self.builder.particle_mass[self._cloth_particle_start + i] = 0.0
-
-    def _create_cloth_mesh(self) -> None:
-        """Create a Blender mesh object that will display the simulated cloth."""
-        if self._cloth_faces is None or self.state_0.particle_q is None:
-            return
-        initial_positions = self.state_0.particle_q.numpy()[
-            self._cloth_particle_start : self._cloth_particle_start
-            + self._cloth_particle_count
-        ]
-        self.cloth_object = db.BlenderObject.from_mesh(
-            vertices=initial_positions,
-            faces=self._cloth_faces,
-            name="WarblerCloth",
-        )
+                    idx = self._cloth_particle_start + i
+                    self.builder.particle_mass[idx] = 0.0
+                    self.builder.particle_flags[idx] = 0
 
     def _update_cloth_visualization(self) -> None:
-        """Copy cloth vertex positions from simulation state back to the Blender mesh."""
+        """Write simulation cloth positions back to the source mesh in local space."""
         if (
             self.cloth_object is None
             or self._cloth_particle_count == 0
             or self.state_0.particle_q is None
+            or self.props.cloth_source is None
         ):
             return
         cloth_positions = self.state_0.particle_q.numpy()[
             self._cloth_particle_start : self._cloth_particle_start
             + self._cloth_particle_count
         ]
-        self.cloth_object.position = cloth_positions
-        # for i in range(self.num_particles):
-        #     self.edges[i, :] = (i - 1, i)
-        #     self.builder.add_spring(i - 1, i, 3, 0.0, 0)
+        # Convert world-space simulation positions to object-local space
+        mat_inv = np.array(self.props.cloth_source.matrix_world.inverted())
+        ones = np.ones((len(cloth_positions), 1), dtype=np.float64)
+        world_h = np.hstack([cloth_positions.astype(np.float64), ones])
+        local_positions = (mat_inv @ world_h.T).T[:, :3].astype(np.float32)
+        self.cloth_object.position = local_positions
 
     # ============================================================================
     # Blender ↔ Simulation Synchronization
@@ -491,27 +536,41 @@ class SimulatorXPBD(SimulatorBase):
     # ============================================================================
 
     def create_pointcloud(self):
-        """Create or update Blender mesh for particle visualization."""
-        name = "ParticleObject"
-
+        """Create Blender pointcloud for non-cloth particles only."""
+        n = self._particle_only_count
         self.particle_object = db.BlenderObject.from_pointcloud(
-            self.particle_positions,
-            name=name,
+            self.particle_positions[:n],
+            name="ParticleObject",
         )
-
         self.particle_object.store_named_attribute(
-            np.array(self.builder.particle_radius),
+            np.array(self.builder.particle_radius[:n]),
             "radius",
         )
 
     def _update_particle_visualization(self):
-        """Update particle mesh with current simulation state."""
-        self.particle_object.position = self.particle_positions
-        self.particle_object.store_named_attribute(self.velocity, "velocity")
+        """Update particle pointcloud with current simulation state."""
+        if self.particle_object is None:
+            return
+        n = self._particle_only_count
+        self.particle_object.position = self.particle_positions[:n]  # type: ignore[assignment]
+        self.particle_object.store_named_attribute(self.velocity[:n], "velocity")
 
     # ============================================================================
     # Main Simulation Loop
     # ============================================================================
+
+    def _check_device(self) -> bool:
+        """Return False and deactivate if the Warp device is in an error state."""
+        try:
+            wp.synchronize_device(self.device)
+            return True
+        except Exception as e:
+            self.props.is_active = False
+            print(
+                f"Warbler: CUDA context is in an error state (likely from a previous "
+                f"simulation crash). Restart Blender to recover. Detail: {e}"
+            )
+            return False
 
     def step(self):
         """Execute one complete simulation step.
@@ -520,14 +579,26 @@ class SimulatorXPBD(SimulatorBase):
 
         Flow: Blender → Simulation → Solve → Blender
         """
-        self._update_simulation_from_blender()
-        start_simulate = time.time()
-        self.simulate()
-        self.props.time_compute = time.time() - start_simulate
-        start_sync = time.time()
-        self._update_blender_from_simulation()
-        if self.model.particle_count > 0:
-            self._update_particle_visualization()
-        self._update_cloth_visualization()
-        self.props.time_sync = time.time() - start_sync
-        self.clock += 1
+        if self.device == "cuda" and not self._check_device():
+            return
+        try:
+            self._update_simulation_from_blender()
+            start_simulate = time.time()
+            self.simulate()
+            self.props.time_compute = time.time() - start_simulate
+            start_sync = time.time()
+            self._update_blender_from_simulation()
+            if self._particle_only_count > 0:
+                self._update_particle_visualization()
+            self._update_cloth_visualization()
+            self.props.time_sync = time.time() - start_sync
+            self.clock += 1
+        except Exception as e:
+            # Warp CUDA errors (e.g. illegal memory access from an unstable
+            # simulation) surface here as RuntimeError. Deactivate so Blender
+            # doesn't keep hitting the same error every frame.
+            self.props.is_active = False
+            print(
+                f"Warbler: simulation deactivated after error on frame {self.clock}: {e}\n"
+                f"  Tip: increase substeps (current={self.substeps}) or reduce cloth_spring_ke."
+            )
