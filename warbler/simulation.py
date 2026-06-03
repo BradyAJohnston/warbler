@@ -128,6 +128,9 @@ class SimulatorXPBD(SimulatorBase):
         self._cloth_faces: np.ndarray | None = None
         self.cloth_object: db.BlenderObject | None = None
         self.particle_object: db.BlenderObject | None = None
+        # Minimum non-pinned cloth vertex mass, used to size a stable timestep.
+        self._cloth_min_mass: float | None = None
+        self._substep_cap_warned: bool = False
 
     @property
     def _particle_only_count(self) -> int:
@@ -356,6 +359,17 @@ class SimulatorXPBD(SimulatorBase):
                     self.builder.particle_mass[idx] = 0.0
                     self.builder.particle_flags[idx] = 0
 
+        # Record the lightest dynamic cloth vertex so simulate() can pick a
+        # timestep small enough to keep the XPBD spring solve stable (see
+        # _stable_substeps).
+        end = self._cloth_particle_start + self._cloth_particle_count
+        cloth_masses = [
+            m
+            for m in self.builder.particle_mass[self._cloth_particle_start : end]
+            if m > 0.0
+        ]
+        self._cloth_min_mass = min(cloth_masses) if cloth_masses else None
+
     def _update_cloth_visualization(self) -> None:
         """Write simulation cloth positions back to the source mesh in local space."""
         if (
@@ -490,12 +504,55 @@ class SimulatorXPBD(SimulatorBase):
     # Physics Simulation (State → Solver → Updated State)
     # ============================================================================
 
+    # XPBD springs are only conditionally stable here: Newton's apply_particle_deltas
+    # sums every spring's correction at a shared vertex with no constraint averaging,
+    # so the solve diverges once the dimensionless ratio S = spring_ke·dt²/mass grows
+    # too large. Measured behaviour on subdivided cubes: outright NaN above S≈0.8, and
+    # a slower post-contact energy gain (cloth launches upward) above S≈0.2. We hold S
+    # under _SPRING_STABILITY_S with a safety margin by subdividing the frame into
+    # enough substeps -- the same lever Newton's cloth examples rely on.
+    _SPRING_STABILITY_S = 0.15
+    _SUBSTEP_CAP = 200
+
+    def _stable_substeps(self) -> int:
+        """Substep count that keeps the XPBD spring solve in its stable regime.
+
+        Returns at least ``self.substeps`` (the user's value is a floor), raising
+        it when the spring stiffness / vertex mass / timestep combination would
+        otherwise blow up. Capped at _SUBSTEP_CAP; warns once if the cap binds.
+        """
+        user = max(self.substeps, 1)
+        m = self._cloth_min_mass
+        ke = self.props.cloth_spring_ke
+        if m is None or m <= 0.0 or ke <= 0.0:
+            return user
+
+        # Require ke·(frame_dt/n)² / m ≤ S  ⇒  n ≥ frame_dt / sqrt(S·m/ke)
+        dt_max = (self._SPRING_STABILITY_S * m / ke) ** 0.5
+        required = int(np.ceil(self.frame_dt / dt_max)) if dt_max > 0 else user
+        n = max(user, required)
+        if n > self._SUBSTEP_CAP:
+            if not self._substep_cap_warned:
+                print(
+                    Warning(
+                        f"Cloth needs ~{n} substeps for a stable spring solve "
+                        f"(spring_ke={ke}, min vertex mass={m:.2e} kg, "
+                        f"fps={self.fps}). Capped at {self._SUBSTEP_CAP}; reduce "
+                        f"cloth_spring_ke, raise cloth_density/cloth_mass_min, or "
+                        f"lower the frame rate to stay stable."
+                    )
+                )
+                self._substep_cap_warned = True
+            n = self._SUBSTEP_CAP
+        return n
+
     def simulate(self):
         """Execute one physics timestep following Newton's pattern:
         State → Solver → Updated State
         """
-        sim_dt = self.frame_dt / self.substeps
-        for _ in range(self.substeps):
+        substeps = self._stable_substeps()
+        sim_dt = self.frame_dt / substeps
+        for _ in range(substeps):
             self.state_0.clear_forces()
             self.model.collide(self.state_0, self.contacts)
             self.solver.step(

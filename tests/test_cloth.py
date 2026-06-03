@@ -187,6 +187,49 @@ def test_cloth_grid_ground_impact_stable():
     assert -0.5 < final_z < 0.5, f"Cloth not resting near ground (z={final_z:.3f})"
 
 
+def test_cloth_subdivided_cube_stable():
+    """A subdivided cube must not explode or gain energy (launch upward).
+
+    Regression: XPBD springs are only conditionally stable -- Newton's solver
+    sums every spring delta at a shared vertex with no constraint averaging, so
+    a denser mesh (lower per-vertex mass, more shared springs) diverged where a
+    plain 8-vertex cube was fine. The solver now auto-subdivides the frame into
+    enough substeps to keep spring_ke*dt^2/mass in the stable regime.
+    """
+    import bmesh
+
+    bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0, 0, 3.0))
+    cube = bpy.context.active_object
+    assert cube is not None and isinstance(cube.data, bpy.types.Mesh)
+
+    bm = bmesh.new()
+    bm.from_mesh(cube.data)
+    bmesh.ops.subdivide_edges(bm, edges=bm.edges[:], cuts=2, use_grid_fill=True)
+    bm.to_mesh(cube.data)
+    bm.free()
+
+    sim = _compile_cloth_sim(cube, substeps=10)
+    # Stability criterion should have raised the effective substep count.
+    assert sim._stable_substeps() > 10
+
+    n = sim._cloth_particle_count
+    assert sim.state_0.particle_q is not None
+    z_start = float(sim.state_0.particle_q.numpy()[:n, 2].mean())
+
+    max_z = z_start
+    for i in range(60):
+        sim.step()
+        assert sim.state_0.particle_q is not None
+        p = sim.state_0.particle_q.numpy()[:n]
+        assert np.all(np.isfinite(p)), f"Explosion (NaN) at step {i + 1}"
+        max_z = max(max_z, float(p[:, 2].mean()))
+
+    # Cloth falls onto the ground; it must never gain energy and launch upward.
+    assert max_z < z_start + 1.0, (
+        f"Cloth gained energy and launched (z_start={z_start:.2f}, max_z={max_z:.2f})"
+    )
+
+
 def test_cloth_writes_back_to_source():
     """Stepping the simulation should update vertex positions on the source mesh."""
     cloth_obj = _flat_grid(4, 4)
