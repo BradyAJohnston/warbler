@@ -17,7 +17,7 @@ GN geometry (points / mesh / curves)
         ↓  frame_change_post handler  (manager.py)
    SimulatorXPBD.step()  every frame
         ↓
-   Blender objects updated (rigid body transforms, particle pointcloud, cloth mesh)
+   Blender objects updated (rigid body transforms, particle pointcloud)
 ```
 
 ### Key files
@@ -40,8 +40,8 @@ GN geometry (points / mesh / curves)
 ## Simulation lifecycle
 
 1. User clicks **Compile** → `WB_OT_CompileSimulation` → `SimulatorXPBD.compile()` → `build()` + `finalize()`
-2. `build()` — creates `newton.ModelBuilder`, adds rigid bodies, particles, cloth
-3. `finalize()` — calls `builder.finalize()`, creates two states, solver, contacts; creates Blender output objects (`ParticleObject`, `WarblerCloth`)
+2. `build()` — creates `newton.ModelBuilder`, adds rigid bodies, particles
+3. `finalize()` — calls `builder.finalize()`, creates two states, solver, contacts; creates Blender output objects (`ParticleObject`)
 4. Every frame change → `_step_simulations(scene, depsgraph)` → `SimulatorXPBD.step()`
 5. `step()` order: `_update_simulation_from_blender` → `simulate` (substep loop) → `_update_blender_from_simulation` → visualisation write-backs
 
@@ -58,12 +58,11 @@ GN geometry (points / mesh / curves)
 
 ## Newton patterns
 
-- `add_cloth_mesh(pos=wp.vec3(...), rot=wp.quat(...), vel=wp.vec3(...), ...)` — **must** use Warp types, not plain tuples. Plain tuples raise "Built-in functions cannot be called with non-Warp array types".
 - `particle_grid` is `None` unless `particle_count > 1` AND `particle_max_radius > 0`. Never call `particle_grid.build()` — the solver does it internally.
 - `contacts = model.contacts()` pre-allocate once in `finalize()`, pass to `model.collide(state, contacts)` and `solver.step(state_in, state_out, control, contacts, dt)`.
 - `particle_q_init` is cloned from `state_in.particle_q` at the start of every `solver.step()`. Writing updated positions for kinematic (pinned) particles into `state_0.particle_q` before the step automatically propagates those positions as the kinematic target — no need to touch `particle_q_init` directly.
 - `add_body(is_kinematic=True)` for user-controlled rigid bodies. Kinematic bodies collide with particles (velocity-driven impulses) but are never moved by physics forces. Previously these were fighting the per-frame position override.
-- `builder.particle_mass` is a plain Python list before `finalize()` — you can zero out pinned cloth vertices by index: `builder.particle_mass[cloth_start + i] = 0.0`.
+- `builder.particle_mass` is a plain Python list before `finalize()` — you can zero out pinned particles by index: `builder.particle_mass[i] = 0.0`.
 
 ---
 
@@ -71,7 +70,7 @@ GN geometry (points / mesh / curves)
 
 Warbler reads these named attributes from geometry at compile time:
 
-**POINT domain (particles and cloth vertices)**
+**POINT domain (particles)**
 
 | Attribute | Type | Used for |
 |---|---|---|
@@ -79,22 +78,9 @@ Warbler reads these named attributes from geometry at compile time:
 | `velocity` | `FLOAT_VECTOR` | Initial velocities |
 | `mass` | `FLOAT` | Per-particle mass |
 | `radius` | `FLOAT` | Collision radius |
-| `pinned` | `BOOLEAN` | `True` → kinematic (zero mass, position driven by GN each frame) |
+| `pinned` | `BOOLEAN` | `True` → kinematic (sets `ParticleFlags` to 0, position driven by GN each frame) |
 
-For cloth, `pinned=True` zeros the vertex mass in `builder.particle_mass` during `_add_cloth()`. For particles, it sets `ParticleFlags` to 0 (not ACTIVE). Both are re-read from GN every frame so animated pin positions work.
-
-**Cloth FACE / EDGE domain** — planned, not yet implemented. See `FEATURES.md`.
-
----
-
-## Cloth simulation
-
-- Source: any mesh object or GN-output mesh
-- Vertices are transformed to world space before passing to `add_cloth_mesh()`
-- Face indices are triangulated via `mesh.calc_loop_triangles()`
-- Output: `WarblerCloth` Blender mesh object, updated every frame
-- Particle range tracked by `_cloth_particle_start` / `_cloth_particle_count`
-- When both particles AND cloth exist: particles are added first, cloth starts at `_cloth_particle_start == particle_count`
+For particles, `pinned=True` sets `ParticleFlags` to 0 (not ACTIVE). Pin positions are re-read from GN every frame so animated pins work.
 
 ---
 
@@ -111,7 +97,6 @@ Tests use `bpy` (the Python package, not a running Blender). The `clean_and_save
 Test files:
 - `test_simulation.py` — rigid body compile + dynamics
 - `test_geometryset.py` — GN attribute reading (mesh, pointcloud, vertex-only)
-- `test_cloth.py` — cloth compile + dynamics + pinning
 
 ---
 
@@ -128,8 +113,6 @@ The blender debug session starts with `-Xfrozen_modules=off` passed to Python to
 - `particle_source_evaluate` property exists in props but is not yet used — currently always evaluates
 - `rigid_decay_frames` prop still exists but `smooth_lerp` was removed when kinematic body handling was fixed. The prop now has no effect.
 - Spring properties (`spring_ke`, `spring_kd`, `spring_kf`) are stored on `SimulationListItem` but `_add_springs()` is empty — not yet wired up.
-- Cloth with a non-mesh source (e.g. a pointcloud object) logs a warning and skips. Check the Blender console.
-- `WarblerCloth` output object name is hardcoded — if two cloth simulations are compiled, the second will overwrite the first's object reference.
 - The `rigid_decay_frames` UI prop in the Rigid Bodies panel no longer does anything.
 
 ---
@@ -138,16 +121,13 @@ The blender debug session starts with `-Xfrozen_modules=off` passed to Python to
 
 **High priority:**
 1. Additional rigid body shapes — sphere, capsule, cylinder (`add_shape_sphere`, `add_shape_capsule`), and mesh SDF (`add_shape_mesh` + `mesh.build_sdf()`)
-2. Cloth FACE/EDGE attribute reads — `tri_ke`, `tri_kd` per face; `edge_ke`, `edge_kd` per edge from GN attributes
-3. Simulation write-back — store `contact_force` / `is_colliding` as named attributes on output objects so GN can react to collisions
+2. Simulation write-back — store `contact_force` / `is_colliding` as named attributes on output objects so GN can react to collisions
 
 **Medium priority:**
-4. Cable / rope simulation — `add_rod()` from a Curves object
-5. Granular / MPM — `SolverImplicitMPM` for sand-like behaviour
-6. Two-way coupling — rigid bodies reacting to cloth/particles
+3. Granular / MPM — `SolverImplicitMPM` for sand-like behaviour
+4. Two-way coupling — rigid bodies reacting to particles
 
 **Cleanup:**
 - Remove `rigid_decay_frames` from the panel (or re-implement as something useful)
 - Remove `spring_ke/kd/kf` from the panel until springs are actually implemented
-- Fix hardcoded `WarblerCloth` name for multi-simulation support
 - `particle_source_evaluate` should control whether GN is re-evaluated at particle read time

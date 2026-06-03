@@ -123,21 +123,7 @@ class SimulatorXPBD(SimulatorBase):
         self.bob: db.BlenderObject | None = None
         self.search_radius = 1.0
         self._pinned_indices: np.ndarray | None = None
-        self._cloth_particle_start: int = 0
-        self._cloth_particle_count: int = 0
-        self._cloth_faces: np.ndarray | None = None
-        self.cloth_object: db.BlenderObject | None = None
         self.particle_object: db.BlenderObject | None = None
-        # Minimum non-pinned cloth vertex mass, used to size a stable timestep.
-        self._cloth_min_mass: float | None = None
-        self._substep_cap_warned: bool = False
-
-    @property
-    def _particle_only_count(self) -> int:
-        """Particles that are not cloth vertices."""
-        if self._cloth_particle_count > 0:
-            return self._cloth_particle_start
-        return self.model.particle_count
 
     def _compile(self) -> None:
         if self.props.is_compiled:
@@ -166,9 +152,6 @@ class SimulatorXPBD(SimulatorBase):
             if len(props.get("position", [])) > 0:
                 self._add_particles(**props)
 
-        if self.props.cloth_source is not None:
-            self._add_cloth(self.props.cloth_source)
-
     def finalize(self):
         self.model: newton.Model = self.builder.finalize(device=self.device)
         self.model.soft_contact_ke = self.props.soft_contact_ke
@@ -188,24 +171,8 @@ class SimulatorXPBD(SimulatorBase):
             if self.particle_object is not None:
                 bpy.data.objects.remove(self.particle_object.object)
                 self.particle_object = None
-            self.cloth_object = None
-        if self._particle_only_count > 0:
+        if self.model.particle_count > 0:
             self.create_pointcloud()
-        if self._cloth_particle_count > 0:
-            src = self.props.cloth_source
-            if (
-                src is not None
-                and isinstance(src.data, bpy.types.Mesh)
-                and len(src.data.vertices) == self._cloth_particle_count
-            ):
-                self.cloth_object = db.BlenderObject(src)
-            else:
-                print(
-                    Warning(
-                        "Cloth source vertex count differs from evaluated mesh "
-                        "(topology-changing modifier?); write-back disabled."
-                    )
-                )
 
     def _add_rigid_bodies(self, objects: list[bpy.types.Object]):
         """Add Blender objects as rigid bodies to the model."""
@@ -269,126 +236,6 @@ class SimulatorXPBD(SimulatorBase):
     def _add_springs(self):
         """Add spring constraints between consecutive particles."""
         pass
-
-    def _add_cloth(self, obj: bpy.types.Object) -> None:
-        """Add a Blender mesh as a cloth simulation."""
-        geo = GeometrySet(obj)
-        data = geo.data
-        if not isinstance(data, bpy.types.Mesh):
-            print(
-                Warning(f"Cloth source {obj.name} does not resolve to a mesh, skipping")
-            )
-            return
-
-        mat = obj.matrix_world
-        vertices = [tuple(mat @ v.co) for v in data.vertices]  # type: ignore[operator]
-        if not vertices:
-            return
-
-        data.calc_loop_triangles()
-        indices: list[int] = []
-        for tri in data.loop_triangles:
-            indices.extend(tri.vertices)
-        if not indices:
-            return
-
-        self._cloth_faces = np.array(indices, dtype=np.int32).reshape(-1, 3)
-        self._cloth_particle_start = self.builder.particle_count
-        self._cloth_particle_count = len(vertices)
-
-        # Store initial local-space positions on the source mesh before simulation.
-        # Use src_mesh.vertices (base mesh) so the attribute size always matches.
-        src_mesh = obj.data
-        if isinstance(src_mesh, bpy.types.Mesh):
-            if "position_start" not in src_mesh.attributes:
-                src_mesh.attributes.new(
-                    name="position_start", type="FLOAT_VECTOR", domain="POINT"
-                )
-            ps_attr = src_mesh.attributes["position_start"]
-            for i, v in enumerate(src_mesh.vertices):
-                ps_attr.data[i].vector = v.co  # type: ignore[attr-defined]
-
-        attrs = data.attributes
-        tri_ke = self.props.cloth_tri_ke
-        tri_ka = self.props.cloth_tri_ka
-        tri_kd = self.props.cloth_tri_kd
-        edge_ke = self.props.cloth_edge_ke
-        edge_kd = self.props.cloth_edge_kd
-
-        self.builder.add_cloth_mesh(
-            pos=wp.vec3(0.0, 0.0, 0.0),
-            rot=wp.quat(0.0, 0.0, 0.0, 1.0),
-            scale=1.0,
-            vel=wp.vec3(0.0, 0.0, 0.0),
-            vertices=vertices,  # type: ignore
-            indices=indices,
-            density=self.props.cloth_density,
-            tri_ke=tri_ke,
-            tri_ka=tri_ka,
-            tri_kd=tri_kd,
-            edge_ke=edge_ke,
-            edge_kd=edge_kd,
-            add_springs=True,
-            spring_ke=self.props.cloth_spring_ke,
-            spring_kd=self.props.cloth_spring_kd,
-            particle_radius=self.props.cloth_particle_radius,
-        )
-
-        # add_cloth_mesh derives per-vertex mass from density × surrounding
-        # triangle area. On a fine mesh this can be ~1e-4 kg, light enough that
-        # the XPBD penalty-contact solve produces position deltas scaled by a
-        # huge inverse mass and diverges to NaN on the first ground impact
-        # (independent of substeps/spring_ke). Clamp non-pinned cloth vertices
-        # to a minimum mass to keep contacts stable. Newton's own XPBD cloth
-        # examples sidestep this by using an explicit mass=0.1 per particle.
-        mass_min = self.props.cloth_mass_min
-        if mass_min > 0.0:
-            end = self._cloth_particle_start + self._cloth_particle_count
-            for idx in range(self._cloth_particle_start, end):
-                self.builder.particle_mass[idx] = max(
-                    self.builder.particle_mass[idx], mass_min
-                )
-
-        # Pin vertices: zero mass AND mark non-ACTIVE (kinematic) so XPBD springs
-        # don't divide by zero on the zero-mass particles.
-        if "pinned" in attrs:
-            pinned = db.Attribute(attrs["pinned"]).as_array().astype(bool)
-            for i, is_pinned in enumerate(pinned):
-                if is_pinned:
-                    idx = self._cloth_particle_start + i
-                    self.builder.particle_mass[idx] = 0.0
-                    self.builder.particle_flags[idx] = 0
-
-        # Record the lightest dynamic cloth vertex so simulate() can pick a
-        # timestep small enough to keep the XPBD spring solve stable (see
-        # _stable_substeps).
-        end = self._cloth_particle_start + self._cloth_particle_count
-        cloth_masses = [
-            m
-            for m in self.builder.particle_mass[self._cloth_particle_start : end]
-            if m > 0.0
-        ]
-        self._cloth_min_mass = min(cloth_masses) if cloth_masses else None
-
-    def _update_cloth_visualization(self) -> None:
-        """Write simulation cloth positions back to the source mesh in local space."""
-        if (
-            self.cloth_object is None
-            or self._cloth_particle_count == 0
-            or self.state_0.particle_q is None
-            or self.props.cloth_source is None
-        ):
-            return
-        cloth_positions = self.state_0.particle_q.numpy()[
-            self._cloth_particle_start : self._cloth_particle_start
-            + self._cloth_particle_count
-        ]
-        # Convert world-space simulation positions to object-local space
-        mat_inv = np.array(self.props.cloth_source.matrix_world.inverted())
-        ones = np.ones((len(cloth_positions), 1), dtype=np.float64)
-        world_h = np.hstack([cloth_positions.astype(np.float64), ones])
-        local_positions = (mat_inv @ world_h.T).T[:, :3].astype(np.float32)
-        self.cloth_object.position = local_positions
 
     # ============================================================================
     # Blender ↔ Simulation Synchronization
@@ -504,53 +351,11 @@ class SimulatorXPBD(SimulatorBase):
     # Physics Simulation (State → Solver → Updated State)
     # ============================================================================
 
-    # XPBD springs are only conditionally stable here: Newton's apply_particle_deltas
-    # sums every spring's correction at a shared vertex with no constraint averaging,
-    # so the solve diverges once the dimensionless ratio S = spring_ke·dt²/mass grows
-    # too large. Measured behaviour on subdivided cubes: outright NaN above S≈0.8, and
-    # a slower post-contact energy gain (cloth launches upward) above S≈0.2. We hold S
-    # under _SPRING_STABILITY_S with a safety margin by subdividing the frame into
-    # enough substeps -- the same lever Newton's cloth examples rely on.
-    _SPRING_STABILITY_S = 0.15
-    _SUBSTEP_CAP = 200
-
-    def _stable_substeps(self) -> int:
-        """Substep count that keeps the XPBD spring solve in its stable regime.
-
-        Returns at least ``self.substeps`` (the user's value is a floor), raising
-        it when the spring stiffness / vertex mass / timestep combination would
-        otherwise blow up. Capped at _SUBSTEP_CAP; warns once if the cap binds.
-        """
-        user = max(self.substeps, 1)
-        m = self._cloth_min_mass
-        ke = self.props.cloth_spring_ke
-        if m is None or m <= 0.0 or ke <= 0.0:
-            return user
-
-        # Require ke·(frame_dt/n)² / m ≤ S  ⇒  n ≥ frame_dt / sqrt(S·m/ke)
-        dt_max = (self._SPRING_STABILITY_S * m / ke) ** 0.5
-        required = int(np.ceil(self.frame_dt / dt_max)) if dt_max > 0 else user
-        n = max(user, required)
-        if n > self._SUBSTEP_CAP:
-            if not self._substep_cap_warned:
-                print(
-                    Warning(
-                        f"Cloth needs ~{n} substeps for a stable spring solve "
-                        f"(spring_ke={ke}, min vertex mass={m:.2e} kg, "
-                        f"fps={self.fps}). Capped at {self._SUBSTEP_CAP}; reduce "
-                        f"cloth_spring_ke, raise cloth_density/cloth_mass_min, or "
-                        f"lower the frame rate to stay stable."
-                    )
-                )
-                self._substep_cap_warned = True
-            n = self._SUBSTEP_CAP
-        return n
-
     def simulate(self):
         """Execute one physics timestep following Newton's pattern:
         State → Solver → Updated State
         """
-        substeps = self._stable_substeps()
+        substeps = max(self.substeps, 1)
         sim_dt = self.frame_dt / substeps
         for _ in range(substeps):
             self.state_0.clear_forces()
@@ -593,14 +398,13 @@ class SimulatorXPBD(SimulatorBase):
     # ============================================================================
 
     def create_pointcloud(self):
-        """Create Blender pointcloud for non-cloth particles only."""
-        n = self._particle_only_count
+        """Create Blender pointcloud for the simulation particles."""
         self.particle_object = db.BlenderObject.from_pointcloud(
-            self.particle_positions[:n],
+            self.particle_positions,
             name="ParticleObject",
         )
         self.particle_object.store_named_attribute(
-            np.array(self.builder.particle_radius[:n]),
+            np.array(self.builder.particle_radius),
             "radius",
         )
 
@@ -608,9 +412,8 @@ class SimulatorXPBD(SimulatorBase):
         """Update particle pointcloud with current simulation state."""
         if self.particle_object is None:
             return
-        n = self._particle_only_count
-        self.particle_object.position = self.particle_positions[:n]  # type: ignore[assignment]
-        self.particle_object.store_named_attribute(self.velocity[:n], "velocity")
+        self.particle_object.position = self.particle_positions  # type: ignore[assignment]
+        self.particle_object.store_named_attribute(self.velocity, "velocity")
 
     # ============================================================================
     # Main Simulation Loop
@@ -645,9 +448,8 @@ class SimulatorXPBD(SimulatorBase):
             self.props.time_compute = time.time() - start_simulate
             start_sync = time.time()
             self._update_blender_from_simulation()
-            if self._particle_only_count > 0:
+            if self.model.particle_count > 0:
                 self._update_particle_visualization()
-            self._update_cloth_visualization()
             self.props.time_sync = time.time() - start_sync
             self.clock += 1
         except Exception as e:
@@ -657,5 +459,5 @@ class SimulatorXPBD(SimulatorBase):
             self.props.is_active = False
             print(
                 f"Warbler: simulation deactivated after error on frame {self.clock}: {e}\n"
-                f"  Tip: increase substeps (current={self.substeps}) or reduce cloth_spring_ke."
+                f"  Tip: increase substeps (current={self.substeps})."
             )

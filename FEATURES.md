@@ -26,7 +26,7 @@ Marks a point as kinematically fixed. Pinned particles are not moved by physics 
 - `True` → particle flags = 0 (kinematic, zero effective mass)
 - `False` / absent → particle flags = `ACTIVE` (physics-driven)
 
-**Dynamic pins**: pinned particle positions are re-read from the evaluated GN tree every frame, before the solve. This means animated or GN-driven pin positions propagate into the simulation automatically — move a pinned vertex in GN and the cloth/particles respond.
+**Dynamic pins**: pinned particle positions are re-read from the evaluated GN tree every frame, before the solve. This means animated or GN-driven pin positions propagate into the simulation automatically — move a pinned point in GN and the particles respond.
 
 ---
 
@@ -43,29 +43,6 @@ Material properties below are **global** in Newton's XPBD (not per-particle). Re
 | `ke` | `FLOAT` | low | Contact stiffness → `model.soft_contact_ke` |
 | `kd` | `FLOAT` | low | Contact damping → `model.soft_contact_kd` |
 | `mu` | `FLOAT` | low | Friction → `model.soft_contact_mu` |
-
----
-
-### Planned — FACE domain (unlocks cloth)
-
-Requires new simulation type: **Cloth** (from mesh). Read via `add_cloth_mesh()`.
-
-| Attribute | Type | Notes |
-|---|---|---|
-| `tri_ke` | `FLOAT` | Per-face stretch stiffness. Scalar fallback from panel if absent |
-| `tri_ka` | `FLOAT` | Per-face area stiffness |
-| `tri_kd` | `FLOAT` | Per-face stretch damping |
-| `tri_drag` | `FLOAT` | Aerodynamic drag per face |
-| `tri_lift` | `FLOAT` | Aerodynamic lift per face |
-
----
-
-### Planned — EDGE domain (cloth bending)
-
-| Attribute | Type | Notes |
-|---|---|---|
-| `edge_ke` | `FLOAT` | Per-edge bending stiffness |
-| `edge_kd` | `FLOAT` | Per-edge bending damping |
 
 ---
 
@@ -93,9 +70,6 @@ Requires new simulation type: **Cloth** (from mesh). Read via `add_cloth_mesh()`
 
 | Type | Newton API | GN input | Priority |
 |---|---|---|---|
-| **Cloth** | `add_cloth_mesh` | Mesh (FACE + EDGE + POINT attrs) | high |
-| **Cables / ropes** | `add_rod` | Curves (ordered control points) | high |
-| **Soft body** | `add_soft_grid` | Volumetric mesh | medium |
 | **Granular / MPM** | `SolverImplicitMPM` | Point cloud | medium |
 
 ## Rigid body shapes to add

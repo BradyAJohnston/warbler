@@ -80,47 +80,9 @@ class SimulationListItem(bpy.types.PropertyGroup):
         description="Evaluate the object and all modifiers first before sourcing the particles",
         default=True,
     )
-    cloth_source: PointerProperty(  # type: ignore
-        type=Object,
-        name="Cloth Source",
-        description="Mesh object to simulate as cloth",
-    )
-    cloth_density: FloatProperty(  # type: ignore
-        name="Density",
-        description="Mass per unit area (kg/m²)",
-        default=0.02,
-        min=1e-4,
-    )
-    cloth_mass_min: FloatProperty(  # type: ignore
-        name="Min Vertex Mass",
-        description=(
-            "Lower bound on per-vertex mass (kg). density×area on a fine mesh "
-            "produces vertices light enough that penalty contacts diverge "
-            "(positions blow up to NaN on ground impact). This floor keeps the "
-            "contact solve stable regardless of mesh resolution. Set to 0 to disable"
-        ),
-        default=1e-3,
-        min=0.0,
-    )
-    cloth_particle_radius: FloatProperty(  # type: ignore
-        name="Collision Radius",
-        description="Collision sphere radius for cloth vertices",
-        default=0.0001,
-        min=1e-4,
-    )
-    cloth_spring_ke: FloatProperty(  # type: ignore
-        name="Spring Stiffness",
-        description="Edge spring stiffness for XPBD shape maintenance",
-        default=1e3,
-    )
-    cloth_spring_kd: FloatProperty(  # type: ignore
-        name="Spring Damping",
-        description="Edge spring damping",
-        default=1.0,
-    )
     soft_contact_ke: FloatProperty(  # type: ignore
         name="Contact Stiffness",
-        description="Stiffness of particle soft contacts (cloth vs ground/rigid bodies)",
+        description="Stiffness of particle soft contacts (particles vs ground/rigid bodies)",
         default=1e2,
     )
     soft_contact_kd: FloatProperty(  # type: ignore
@@ -132,31 +94,6 @@ class SimulationListItem(bpy.types.PropertyGroup):
         name="Contact Friction",
         description="Friction coefficient for particle soft contacts",
         default=0.5,
-    )
-    cloth_tri_ke: FloatProperty(  # type: ignore
-        name="Stretch Stiffness",
-        description="Per-face stretch stiffness. Override per face with 'tri_ke' attribute",
-        default=1e3,
-    )
-    cloth_tri_ka: FloatProperty(  # type: ignore
-        name="Area Stiffness",
-        description="Per-face area preservation stiffness",
-        default=1e3,
-    )
-    cloth_tri_kd: FloatProperty(  # type: ignore
-        name="Stretch Damping",
-        description="Per-face stretch damping",
-        default=1e-1,
-    )
-    cloth_edge_ke: FloatProperty(  # type: ignore
-        name="Bending Stiffness",
-        description="Per-edge bending stiffness. Override per edge with 'edge_ke' attribute",
-        default=1e1,
-    )
-    cloth_edge_kd: FloatProperty(  # type: ignore
-        name="Bending Damping",
-        description="Per-edge bending damping",
-        default=0.0,
     )
     rigid_decay_frames: IntProperty(  # type: ignore
         name="Rigid Input Smoothing",

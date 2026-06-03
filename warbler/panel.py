@@ -8,7 +8,6 @@ from .props import WarblerObjectProperties, WarblerSceneProperties
 
 # Attributes warbler knows how to map into a simulation
 _KNOWN_PARTICLE_ATTRS = {"position", "velocity", "mass", "radius", "pinned"}
-_KNOWN_CLOTH_ATTRS = {"pinned", "tri_ke", "tri_ka", "tri_kd", "edge_ke", "edge_kd"}
 
 DOMAIN_SHORT = {
     "POINT": "pt",
@@ -204,30 +203,6 @@ class WB_PT_WarblerPanel(Panel):
                 col.prop(item, "spring_ke")
                 col.prop(item, "spring_kd")
                 col.prop(item, "spring_kf")
-
-        header, panel = create_panel(layout, idname="cloth")
-        header.label(text="Cloth")
-        if panel:
-            col = panel.column()
-            col.prop(item, "cloth_source", text="Source")
-            if item.cloth_source is not None:
-                draw_geometry_info(
-                    col, item.cloth_source, context, known_attrs=_KNOWN_CLOTH_ATTRS
-                )
-            col.separator()
-            col.prop(item, "cloth_density")
-            col.prop(item, "cloth_mass_min")
-            # XPBD has no triangle constraint: stretch is enforced by edge
-            # springs (add_springs), so expose cloth_spring_* here. The
-            # cloth_tri_* props are ignored by the XPBD solver.
-            sub = col.column(align=True)
-            sub.label(text="Stretch (springs):")
-            sub.prop(item, "cloth_spring_ke", text="Stiffness")
-            sub.prop(item, "cloth_spring_kd", text="Damping")
-            sub = col.column(align=True)
-            sub.label(text="Bending:")
-            sub.prop(item, "cloth_edge_ke", text="Stiffness")
-            sub.prop(item, "cloth_edge_kd", text="Damping")
 
         header, panel = create_panel(layout, idname="rigid_bodies")
         header.label(text="Rigid Bodies")
