@@ -2,6 +2,7 @@ import bpy
 import pytest
 
 from warbler.manager import get_manager
+from warbler.props import object_properties
 from warbler.simulation import SimulatorXPBD
 from warbler.utils import get_scene
 
@@ -27,7 +28,7 @@ def test_empty_simulation_compiles():
 def test_rigid_body_compiles():
     """A simulation with one CUBE rigid body should compile without error."""
     cube = bpy.data.objects["Cube"]
-    cube.wb.sim_shape = "CUBE"
+    object_properties(cube).sim_shape = "CUBE"
 
     coll = _make_rigid_collection()
     coll.objects.link(cube)
@@ -58,7 +59,7 @@ def test_active_body_falls(rigid_simulation):
 def test_inactive_body_does_not_move_from_physics(rigid_simulation):
     """An inactive (kinematic) body should stay where Blender puts it."""
     cube = bpy.data.objects["Cube"]
-    cube.wb.is_active = False
+    object_properties(cube).is_active = False
 
     initial_z = float(cube.location.z)
 

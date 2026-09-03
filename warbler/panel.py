@@ -48,7 +48,7 @@ def draw_geometry_info(
 
     try:
         geo = GeometrySet(obj, context)
-    except Exception:
+    except Exception:  # noqa: BLE001 — GN evaluation can fail arbitrarily; show it in the UI
         layout.label(text="Could not evaluate geometry", icon="ERROR")
         return
 
@@ -94,7 +94,7 @@ def draw_geometry_info(
 
 def create_panel(
     layout: UILayout, idname: str | None = None, default_closed: bool = False
-) -> tuple[UILayout, UILayout]:
+) -> tuple[UILayout, UILayout | None]:
     if idname is None:
         idname = "NewPanelName"
     header, panel = layout.panel(idname, default_closed=default_closed)
@@ -166,7 +166,7 @@ class WB_PT_WarblerPanel(Panel):
 
         col.template_list(
             "WB_UL_RigidBodyCollection",
-            "{}_rigid_objects".format(item.name),
+            f"{item.name}_rigid_objects",
             item.sim_rigid_collection,
             "objects",
             sprops,

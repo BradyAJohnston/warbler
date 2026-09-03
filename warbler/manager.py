@@ -1,8 +1,9 @@
-from .simulation import SimulatorXPBD, SimulatorBase
 import bpy
-from bpy.types import Context, Scene
 from bpy.app.handlers import persistent
+from bpy.types import Context, Scene
+
 from . import props
+from .simulation import SimulatorBase, SimulatorXPBD
 from .utils import get_scene
 
 
@@ -19,7 +20,7 @@ class SimulationManager:
         return props.scene_properties(bpy.context)
 
     @property
-    def sim_items(self) -> bpy.types.bpy_prop_collection_idprop:  #
+    def sim_items(self) -> bpy.types.bpy_prop_collection_idprop:
         return self.scene.wb.sim_list  # type: ignore
 
     @property

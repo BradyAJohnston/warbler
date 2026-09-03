@@ -1,10 +1,11 @@
-import warp as wp
-import newton
 import databpy as db
-from . import utils
-from .utils import quat_to_blender
+import newton
+import warp as wp
 from bpy.types import Object
-from .props import WarblerObjectProperties
+
+from . import utils
+from .props import WarblerObjectProperties, object_properties
+from .utils import quat_to_blender
 
 
 class RigidObject(db.BlenderObjectBase):
@@ -14,7 +15,7 @@ class RigidObject(db.BlenderObjectBase):
 
     @property
     def props(self) -> WarblerObjectProperties:
-        return self.object.wb  # type: ignore
+        return object_properties(self.object)
 
     @property
     def is_active(self) -> bool:

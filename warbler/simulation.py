@@ -1,22 +1,23 @@
-from bpy.types import Object
-from .geometryset import GeometrySet
+import time
+from abc import ABC
+from typing import TYPE_CHECKING
+from uuid import uuid1
+
 import bpy
-import warp as wp
+import databpy as db
 import newton
 import numpy as np
-import databpy as db
+import warp as wp
+from bpy.types import Object
+
+from . import rigid
+from .geometryset import GeometrySet
+from .props import SimulationListItem
 from .utils import (
-    get_scene,
     blender_rotation,
+    get_scene,
     wp_transform,
 )
-from . import rigid
-from .props import SimulationListItem
-from uuid import uuid1
-from typing import TYPE_CHECKING
-from abc import ABC
-import time
-
 
 if TYPE_CHECKING:
     from .manager import SimulationManager
@@ -167,10 +168,9 @@ class SimulatorXPBD(SimulatorBase):
         )
         self.control = self.model.control()
         self.contacts = self.model.contacts()
-        if self.props.is_compiled:
-            if self.particle_object is not None:
-                bpy.data.objects.remove(self.particle_object.object)
-                self.particle_object = None
+        if self.props.is_compiled and self.particle_object is not None:
+            bpy.data.objects.remove(self.particle_object.object)
+            self.particle_object = None
         if self.model.particle_count > 0:
             self.create_pointcloud()
 
@@ -235,7 +235,6 @@ class SimulatorXPBD(SimulatorBase):
 
     def _add_springs(self):
         """Add spring constraints between consecutive particles."""
-        pass
 
     # ============================================================================
     # Blender ↔ Simulation Synchronization
@@ -424,7 +423,7 @@ class SimulatorXPBD(SimulatorBase):
         try:
             wp.synchronize_device(self.device)
             return True
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — any device error means the context is unusable
             self.props.is_active = False
             print(
                 f"Warbler: CUDA context is in an error state (likely from a previous "
@@ -452,7 +451,7 @@ class SimulatorXPBD(SimulatorBase):
                 self._update_particle_visualization()
             self.props.time_sync = time.time() - start_sync
             self.clock += 1
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             # Warp CUDA errors (e.g. illegal memory access from an unstable
             # simulation) surface here as RuntimeError. Deactivate so Blender
             # doesn't keep hitting the same error every frame.

@@ -117,8 +117,6 @@ class WB_UL_SimulationList(bpy.types.UIList):
         index=0,
         flt_flag=0,
     ):
-        layout: bpy.types.UILayout = layout
-
         layout.label(text=item.name)
 
         layout.prop(item, "is_active", text="")
@@ -134,6 +132,11 @@ def scene_properties(context: Context | None) -> WarblerSceneProperties:
         context = bpy.context
 
     return context.scene.wb  # type: ignore
+
+
+def object_properties(obj: Object) -> "WarblerObjectProperties":
+    """Typed accessor for the `wb` property group registered on Object."""
+    return obj.wb  # type: ignore
 
 
 class WarblerObjectProperties(PropertyGroup):

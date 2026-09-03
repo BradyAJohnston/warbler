@@ -1,12 +1,9 @@
 import bpy
-from bpy.utils import register_class, unregister_class
-from bpy.props import PointerProperty
 from bpy.app.handlers import frame_change_post
+from bpy.props import PointerProperty
+from bpy.utils import register_class, unregister_class
 
-from . import ops
-from . import panel
-from . import props
-from . import manager
+from . import manager, ops, panel, props
 
 CLASSES = ops.CLASSES + props.CLASSES + panel.CLASSES
 

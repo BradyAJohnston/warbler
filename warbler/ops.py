@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 from bpy.types import Context, Operator
 
 from .manager import get_manager
@@ -5,23 +7,23 @@ from .simulation import SimulatorXPBD
 
 
 class ReturnValues:
-    RUNNING_MODAL = {"RUNNING_MODAL"}
-    CANCELLED = {"CANCELLED"}
-    FINISHED = {"FINISHED"}
-    PASS_THROUGH = {"PASS_THROUGH"}
-    INTERFACE = {"INTERFACE"}
+    RUNNING_MODAL: ClassVar[set[str]] = {"RUNNING_MODAL"}
+    CANCELLED: ClassVar[set[str]] = {"CANCELLED"}
+    FINISHED: ClassVar[set[str]] = {"FINISHED"}
+    PASS_THROUGH: ClassVar[set[str]] = {"PASS_THROUGH"}
+    INTERFACE: ClassVar[set[str]] = {"INTERFACE"}
 
 
 class ReportValues:
-    DEBUG = {"DEBUG"}
-    INFO = {"INFO"}
-    OPERATOR = {"OPERATOR"}
-    PROPERTY = {"PROPERTY"}
-    WARNING = {"WARNING"}
-    ERROR = {"ERROR"}
-    ERROR_INVALID_INPUT = {"ERROR_INVALID_INPUT"}
-    ERROR_INVALID_CONTEXT = {"ERROR_INVALID_CONTEXT"}
-    ERROR_OUT_OF_MEMORY = {"ERROR_OUT_OF_MEMORY"}
+    DEBUG: ClassVar[set[str]] = {"DEBUG"}
+    INFO: ClassVar[set[str]] = {"INFO"}
+    OPERATOR: ClassVar[set[str]] = {"OPERATOR"}
+    PROPERTY: ClassVar[set[str]] = {"PROPERTY"}
+    WARNING: ClassVar[set[str]] = {"WARNING"}
+    ERROR: ClassVar[set[str]] = {"ERROR"}
+    ERROR_INVALID_INPUT: ClassVar[set[str]] = {"ERROR_INVALID_INPUT"}
+    ERROR_INVALID_CONTEXT: ClassVar[set[str]] = {"ERROR_INVALID_CONTEXT"}
+    ERROR_OUT_OF_MEMORY: ClassVar[set[str]] = {"ERROR_OUT_OF_MEMORY"}
 
 
 class BaseOperator(Operator):
@@ -55,10 +57,10 @@ class WB_OT_CompileSimulation(BaseOperator):
         man = self.manager(context)
         try:
             man.active_simulation.compile()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — report any compile failure in the UI
             self.report(
                 ReportValues.ERROR,  # type: ignore
-                "Unable to compile simulation, error: {}".format(e),
+                f"Unable to compile simulation, error: {e}",
             )
         return ReturnValues.FINISHED
 
@@ -73,11 +75,8 @@ class WB_OT_RemoveSimulation(BaseOperator):
     def execute(self, context: Context):
         man = self.manager(context)
         item = man.active_item
-        try:
-            del man.simulations[item.name]
-            man.sim_items.remove(man.item_index)
-        except Exception:
-            man.sim_items.remove(man.item_index)
+        man.simulations.pop(item.name, None)
+        man.sim_items.remove(man.item_index)
         man.item_index = max(0, man.item_index - 1)
         return ReturnValues.FINISHED
 

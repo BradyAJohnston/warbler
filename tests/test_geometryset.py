@@ -4,7 +4,6 @@ import numpy as np
 
 from warbler.geometryset import GeometrySet
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -14,6 +13,13 @@ RNG = np.random.default_rng(42)
 
 def _random_positions(n: int) -> np.ndarray:
     return RNG.random((n, 3), dtype=np.float32)
+
+
+def _mesh_data(obj: bpy.types.Object) -> bpy.types.Mesh:
+    """Narrow obj.data to Mesh so attribute access type-checks."""
+    mesh = obj.data
+    assert isinstance(mesh, bpy.types.Mesh)
+    return mesh
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +38,7 @@ def test_reads_positions_from_mesh():
     assert isinstance(positions, np.ndarray)
     assert positions.ndim == 2
     assert positions.shape[1] == 3
-    assert len(positions) == len(cube.data.vertices)
+    assert len(positions) == len(_mesh_data(cube).vertices)
 
 
 def test_obj_type_is_mesh():
@@ -55,10 +61,10 @@ def test_to_props_skips_missing_attributes():
 def test_reads_custom_named_attribute_on_mesh():
     """A named float attribute added to a mesh should appear in to_props()."""
     cube = bpy.data.objects["Cube"]
-    mesh = cube.data
+    mesh = _mesh_data(cube)
 
     attr = mesh.attributes.new(name="mass", type="FLOAT", domain="POINT")
-    for i, d in enumerate(attr.data):
+    for i, d in enumerate(attr.data):  # ty: ignore[unresolved-attribute]
         d.value = float(i + 1)
 
     geo = GeometrySet(cube)
@@ -73,7 +79,7 @@ def test_reads_custom_named_attribute_on_mesh():
 def test_mesh_point_count():
     cube = bpy.data.objects["Cube"]
     geo = GeometrySet(cube)
-    assert geo._get_point_count() == len(cube.data.vertices)
+    assert geo._get_point_count() == len(_mesh_data(cube).vertices)
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
-import databpy as db
-from bpy.types import Object, Context, Depsgraph
 import bpy
+import databpy as db
 import numpy as np
+from bpy.types import Context, Depsgraph, Object
 
 # Geometry data types that carry named attributes
 _GEOM_TYPES = (bpy.types.Mesh, bpy.types.PointCloud, bpy.types.Curves)
@@ -27,7 +27,7 @@ class GeometryAttributes:
             return {}
         attrs = self._data.attributes
         return {
-            name: db.Attribute(attrs[name]).as_array()
+            name: db.Attribute(attrs[name]).as_array()  # ty: ignore[invalid-argument-type]
             for name in ["position", "velocity", "mass", "radius", "pinned"]
             if name in attrs
         }
@@ -91,7 +91,7 @@ class GeometrySet:
         if data is None:
             return 0
         if "position" in data.attributes:
-            return len(data.attributes["position"].data)
+            return len(data.attributes["position"].data)  # ty: ignore[unresolved-attribute]
         if isinstance(data, bpy.types.Mesh):
             return len(data.vertices)
         return 0

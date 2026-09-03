@@ -1,7 +1,7 @@
-import numpy as np
 import bpy
-from mathutils import Quaternion
+import numpy as np
 import warp as wp
+from mathutils import Quaternion
 
 
 def get_scene() -> bpy.types.Scene:

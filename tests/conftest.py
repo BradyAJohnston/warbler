@@ -1,13 +1,14 @@
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import bpy
 import pytest
 
 import warbler
 from warbler import manager as mgr
-from warbler.simulation import SimulatorXPBD
 from warbler.manager import get_manager
+from warbler.props import object_properties
+from warbler.simulation import SimulatorXPBD
 from warbler.utils import get_scene
 
 CURRENT = Path(__file__).parent
@@ -39,8 +40,9 @@ def rigid_simulation():
     """Compiled CPU simulation: one active cube rigid body above the ground plane."""
     cube = bpy.data.objects["Cube"]
     cube.location = (0, 0, 5)
-    cube.wb.is_active = True
-    cube.wb.sim_shape = "CUBE"
+    wb = object_properties(cube)
+    wb.is_active = True
+    wb.sim_shape = "CUBE"
 
     coll = bpy.data.collections.new("Rigid")
     get_scene().collection.children.link(coll)
