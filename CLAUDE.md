@@ -59,7 +59,8 @@ GN geometry (points / mesh / curves)
 ## Newton patterns
 
 - `particle_grid` is `None` unless `particle_count > 1` AND `particle_max_radius > 0`. Never call `particle_grid.build()` — the solver does it internally.
-- `contacts = model.contacts()` pre-allocate once in `finalize()`, pass to `model.collide(state, contacts)` and `solver.step(state_in, state_out, control, contacts, dt)`.
+- Collision: create `newton.CollisionPipeline(model)` once in `finalize()`, pre-allocate `contacts = pipeline.contacts()`, then per substep `pipeline.collide(state, contacts)` and `solver.step(state_in, state_out, control, contacts, dt)`. (`model.contacts()` / `model.collide()` are deprecated since newton 1.5.)
+- `newton.use_coord_layout_targets = True` is set at import in `simulation.py` — silences the legacy joint_target_q layout DeprecationWarning; warbler never writes joint targets. A checkout of newton's dev branch lives at `../newton` (examples + `docs/migration.rst`).
 - `particle_q_init` is cloned from `state_in.particle_q` at the start of every `solver.step()`. Writing updated positions for kinematic (pinned) particles into `state_0.particle_q` before the step automatically propagates those positions as the kinematic target — no need to touch `particle_q_init` directly.
 - `add_body(is_kinematic=True)` for user-controlled rigid bodies. Kinematic bodies collide with particles (velocity-driven impulses) but are never moved by physics forces. Previously these were fighting the per-frame position override.
 - `builder.particle_mass` is a plain Python list before `finalize()` — you can zero out pinned particles by index: `builder.particle_mass[i] = 0.0`.

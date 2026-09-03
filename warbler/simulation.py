@@ -22,6 +22,11 @@ from .utils import (
 if TYPE_CHECKING:
     from .manager import SimulationManager
 
+# Opt in to the coordinate-layout joint_target_q (the future default). We never
+# write joint targets, so this only silences the legacy-layout DeprecationWarning
+# emitted by finalize() for models with free joints.
+newton.use_coord_layout_targets = True
+
 
 class SimulatorBase(ABC):
     @property
@@ -167,7 +172,8 @@ class SimulatorXPBD(SimulatorBase):
             iterations=self.props.iterations,
         )
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = newton.CollisionPipeline(self.model)
+        self.contacts = self.collision_pipeline.contacts()
         if self.props.is_compiled and self.particle_object is not None:
             bpy.data.objects.remove(self.particle_object.object)
             self.particle_object = None
@@ -358,7 +364,7 @@ class SimulatorXPBD(SimulatorBase):
         sim_dt = self.frame_dt / substeps
         for _ in range(substeps):
             self.state_0.clear_forces()
-            self.model.collide(self.state_0, self.contacts)
+            self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(
                 self.state_0, self.state_1, self.control, self.contacts, sim_dt
             )
