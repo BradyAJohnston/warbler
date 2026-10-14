@@ -34,8 +34,14 @@ dev = [
     "ty>=0.0.34",
     "urllib3>=2.6.3",
     "pre-commit",
+    "molecularnodes>=520.3.0",
 ]
 docs = ["quartodoc", "quarto-cli>=1.9", "tomlkit"]
+
+[tool.uv.sources]
+# 520.3.0 isn't on PyPI yet (520.2.0 needs an older nodebpy). Its node asset
+# library isn't committed, but nodebpy builds the groups from source instead.
+molecularnodes = { git = "https://github.com/BradyAJohnston/MolecularNodes", rev = "9059f03ad30778be0abdfc5b1afa641f40d7ce52" }
 
 [tool.extbpy]
 # Blender-specific metadata. `extbpy build` merges this with [project] to

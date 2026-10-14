@@ -7,7 +7,15 @@ from bpy.types import Context, Depsgraph, Object
 _GEOM_TYPES = (bpy.types.Mesh, bpy.types.PointCloud, bpy.types.Curves)
 
 # POINT-domain attributes warbler reads from every geometry component
-PARTICLE_ATTRIBUTES = ("position", "velocity", "mass", "radius", "pinned")
+PARTICLE_ATTRIBUTES = (
+    "position",
+    "velocity",
+    "mass",
+    "radius",
+    "pinned",
+    "on_surface",
+    "surface_offset",
+)
 
 
 class GeometryAttributes:
@@ -63,6 +71,43 @@ class GeometryAttributes:
         tris = np.zeros(len(self._data.loop_triangles) * 3, dtype=np.int32)
         self._data.loop_triangles.foreach_get("vertices", tris)
         return tris.reshape(-1, 3)
+
+    @property
+    def edges(self) -> np.ndarray:
+        """(N, 2) vertex indices of the mesh's edges (Mesh data only)."""
+        if not isinstance(self._data, bpy.types.Mesh) or len(self._data.edges) == 0:
+            return np.zeros((0, 2), dtype=np.int32)
+        edges = np.zeros(len(self._data.edges) * 2, dtype=np.int32)
+        self._data.edges.foreach_get("vertices", edges)
+        return edges.reshape(-1, 2)
+
+    def edge_attribute(self, name: str) -> np.ndarray | None:
+        """An EDGE-domain attribute of the mesh, if it has one."""
+        if not isinstance(self._data, bpy.types.Mesh):
+            return None
+        attr = self._data.attributes.get(name)
+        if attr is None or attr.domain != "EDGE":
+            return None
+        return db.Attribute(attr).as_array()
+
+    def point_attributes(self) -> dict[str, tuple[np.ndarray, str]]:
+        """Every user POINT attribute (except position) with its data type.
+
+        Used to carry source attributes (e.g. Molecular Nodes' ``res_id``,
+        ``chain_id``) over to the simulation output.
+        """
+        if self._data is None:
+            return {}
+        out = {}
+        for attr in self._data.attributes:
+            if (
+                attr.domain != "POINT"
+                or attr.name == "position"
+                or attr.name.startswith(".")
+            ):
+                continue
+            out[attr.name] = (db.Attribute(attr).as_array(), attr.data_type)
+        return out
 
     @property
     def faces(self) -> list[list[int]]:

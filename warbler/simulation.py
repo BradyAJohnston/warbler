@@ -11,8 +11,8 @@ import numpy as np
 import warp as wp
 from bpy.types import Object
 
-from . import rigid
-from .geometryset import GeometrySet
+from . import kernels, rigid
+from .geometryset import GeometryAttributes, GeometrySet
 from .props import SimulationListItem
 from .utils import (
     angular_velocity,
@@ -102,7 +102,7 @@ class SourcePart:
 
     ``component`` is the GeometrySet component the part was read from: ``points``
     (free particles), ``curves`` (spring chains) or ``mesh`` (cloth when it has
-    faces, free particles otherwise).
+    faces, otherwise particles joined by springs along its edges).
     """
 
     component: str
@@ -110,6 +110,14 @@ class SourcePart:
     count: int
     curve_sizes: np.ndarray | None = None
     faces: list[list[int]] = field(default_factory=list)
+    # (N, 2) local particle indices joined by springs: the first
+    # ``bond_count`` are mesh edges (permanent bonds), the rest network contacts
+    edges: np.ndarray | None = None
+    bond_count: int = 0
+    # Index of this part's first spring in the model
+    spring_start: int = 0
+    # Source POINT attributes copied onto the output: name -> (values, type)
+    attributes: dict[str, tuple[np.ndarray, str]] = field(default_factory=dict)
     output: db.BlenderObject | None = None
 
     @property
@@ -125,7 +133,28 @@ class SourcePart:
         """Blender object type of this part's output."""
         if self.curve_sizes is not None:
             return "CURVES"
-        return "MESH" if self.is_cloth else "POINTCLOUD"
+        if self.is_cloth or (self.edges is not None and len(self.edges) > 0):
+            return "MESH"
+        return "POINTCLOUD"
+
+
+def network_edges(position: np.ndarray, cutoff: float) -> np.ndarray:
+    """(N, 2) index pairs ``i < j`` of every two points closer than ``cutoff``.
+
+    Brute force in blocks of rows, which is plenty for the few thousand beads
+    of a coarse-grained protein.
+    """
+    position = np.asarray(position, dtype=np.float64)
+    sq = np.einsum("ij,ij->i", position, position)
+    pairs = [np.zeros((0, 2), dtype=np.int64)]
+    for start in range(0, len(position), 256):
+        block = position[start : start + 256]
+        d2 = sq[start : start + 256, None] + sq[None, :] - 2.0 * block @ position.T
+        i, j = np.nonzero(d2 < cutoff * cutoff)
+        i += start
+        keep = i < j
+        pairs.append(np.column_stack([i[keep], j[keep]]))
+    return np.concatenate(pairs).astype(np.int32)
 
 
 class Simulator(SimulatorBase):
@@ -168,8 +197,20 @@ class Simulator(SimulatorBase):
         self._pinned_indices: np.ndarray | None = None
         # (object, shape index) of each rigid box, for live scale updates
         self._rigid_shapes: list[tuple[Object, int]] = []
+        # Advanced every substep so the thermostat draws fresh noise
+        self._noise_seed: int = 0
+        # Network contacts (springs that can break), set up in finalize()
+        self._contact_ids: wp.array | None = None
+        self._contact_ke: wp.array | None = None
+        self._contact_broken: wp.array | None = None
+        self._spring_rest: np.ndarray | None = None
         # (start, target) shape_scale to ramp between over this frame's substeps
         self._scale_ramp: tuple[np.ndarray, np.ndarray] | None = None
+        # Particles held on props.surface, set up in finalize()
+        self._surface_ids: list[np.ndarray] = []
+        self._surface_offsets: list[np.ndarray] = []
+        self._surface_mesh: wp.Mesh | None = None
+        self._surface_indices: wp.array | None = None
 
     def _compile(self) -> None:
         self._free_model()
@@ -189,9 +230,19 @@ class Simulator(SimulatorBase):
             "control",
             "collision_pipeline",
             "contacts",
+            "_contact_ids",
+            "_contact_ke",
+            "_contact_broken",
+            "_surface_points",
+            "_surface_vertex_normals",
+            "_surface_offset",
+            "_surface_normal",
         ):
             if hasattr(self, name):
                 delattr(self, name)
+        self._contact_ids = None
+        self._surface_mesh = None
+        self._surface_indices = None
 
     def free(self) -> None:
         """Stop the simulation and release it, keeping the output objects.
@@ -208,10 +259,14 @@ class Simulator(SimulatorBase):
         # location / rotation / scale until the view layer is re-evaluated.
         if bpy.context.view_layer is not None:
             bpy.context.view_layer.update()
-        self.builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        self.builder = newton.ModelBuilder(
+            up_axis=newton.Axis.Z, gravity=(0.0, 0.0, self.props.gravity)
+        )
         self.builder.default_particle_radius = DEFAULT_RADIUS
         self.parts = []
         self._pinned_indices = None
+        self._surface_ids: list[np.ndarray] = []
+        self._surface_offsets: list[np.ndarray] = []
         self._rigid_shapes = []
 
         self._add_rigid_bodies(self.objects)
@@ -246,6 +301,96 @@ class Simulator(SimulatorBase):
         self.control = self.model.control()
         self.collision_pipeline = newton.CollisionPipeline(self.model)
         self.contacts = self.collision_pipeline.contacts()
+        self._init_network_contacts()
+        self._init_surface()
+
+    def _init_surface(self) -> None:
+        """Upload the particles held on ``props.surface`` and build its mesh."""
+        self._surface_mesh = None
+        self._surface_indices = None
+        ids = np.concatenate(self._surface_ids) if self._surface_ids else []
+        if len(ids) == 0:
+            return
+        device = self.model.device
+        self._surface_indices = wp.array(ids, dtype=wp.int32, device=device)
+        self._surface_offset = wp.array(
+            np.concatenate(self._surface_offsets), dtype=float, device=device
+        )
+        self._surface_normal = wp.zeros(len(ids), dtype=wp.vec3, device=device)
+        self._update_surface()
+        self._project_to_surface()
+
+    def _update_surface(self) -> None:
+        """Rebuild the surface mesh from the evaluated ``props.surface``.
+
+        Rebuilt rather than refit every frame, as remeshed surfaces (e.g. an
+        SDF union as two vesicles fuse) change topology.
+        """
+        surface = self.props.surface
+        if self._surface_indices is None or surface is None:
+            return
+        attrs = GeometrySet(surface).mesh
+        mesh = attrs._data
+        triangles = attrs.triangles
+        if not isinstance(mesh, bpy.types.Mesh) or len(triangles) == 0:
+            return
+        mat = np.array(surface.matrix_world, dtype=np.float64)
+        position = db.Attribute(mesh.attributes["position"]).as_array()
+        position = position @ mat[:3, :3].T + mat[:3, 3]
+        normals = np.zeros(len(mesh.vertices) * 3, dtype=np.float32)
+        mesh.vertex_normals.foreach_get("vector", normals)
+        normals = normals.reshape(-1, 3) @ np.linalg.inv(mat[:3, :3])
+        normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+        device = self.model.device
+        self._surface_points = wp.array(position, dtype=wp.vec3, device=device)
+        self._surface_vertex_normals = wp.array(normals, dtype=wp.vec3, device=device)
+        self._surface_mesh = wp.Mesh(
+            points=self._surface_points,
+            indices=wp.array(triangles.ravel(), dtype=wp.int32, device=device),
+        )
+
+    def _project_to_surface(self) -> None:
+        if self._surface_mesh is None or self._surface_indices is None:
+            return
+        wp.launch(
+            kernels.project_to_surface,
+            dim=len(self._surface_indices),
+            inputs=[
+                self._surface_mesh.id,
+                self._surface_vertex_normals,
+                self._surface_indices,
+                self._surface_offset,
+            ],
+            outputs=[
+                self.state_0.particle_q,
+                self.state_0.particle_qd,
+                self._surface_normal,
+            ],
+            device=self.model.device,
+        )
+
+    def _init_network_contacts(self) -> None:
+        """Gather the breakable network-contact springs of every part."""
+        self._contact_ids = None
+        self._spring_rest = None
+        if self.model.spring_count == 0:
+            return
+        assert self.model.spring_rest_length is not None
+        self._spring_rest = self.model.spring_rest_length.numpy()
+        ids = [
+            np.arange(p.spring_start + p.bond_count, p.spring_start + len(p.edges))
+            for p in self.parts
+            if p.edges is not None
+        ]
+        ids = np.concatenate(ids) if ids else np.zeros(0, dtype=np.int32)
+        if len(ids) == 0:
+            return
+        device = self.model.device
+        assert self.model.spring_stiffness is not None
+        native = self.model.spring_stiffness.numpy()[ids]
+        self._contact_ids = wp.array(ids, dtype=wp.int32, device=device)
+        self._contact_ke = wp.array(native, dtype=float, device=device)
+        self._contact_broken = wp.zeros(len(ids), dtype=wp.int32, device=device)
 
     def _add_rigid_bodies(self, objects: list[bpy.types.Object]):
         """Add Blender objects as rigid bodies to the model."""
@@ -297,10 +442,13 @@ class Simulator(SimulatorBase):
             props = self._world_props(attrs.to_props())
             if len(props.get("position", [])) == 0:
                 return
+            on_surface = props.pop("on_surface", None)
+            surface_offset = props.pop("surface_offset", None)
             part = SourcePart(
                 component=component,
                 start=self.builder.particle_count,
                 count=len(props["position"]),
+                attributes=attrs.point_attributes(),
                 **kwargs,
             )
             if part.is_cloth:
@@ -309,8 +457,20 @@ class Simulator(SimulatorBase):
                 self._add_particles(**props)
                 if part.curve_sizes is not None:
                     self._add_curve_springs(part)
+                else:
+                    self._add_edge_springs(part, attrs, props["position"])
             if "pinned" in props:
                 pinned.append(part.start + np.flatnonzero(props["pinned"]))
+            if self.props.surface is not None:
+                if on_surface is None:
+                    on_surface = ~props.get("pinned", np.zeros(part.count, bool))
+                local = np.flatnonzero(on_surface)
+                self._surface_ids.append(part.start + local)
+                self._surface_offsets.append(
+                    np.zeros(len(local))
+                    if surface_offset is None
+                    else surface_offset[local]
+                )
             self.parts.append(part)
 
         add("points", geo.points)
@@ -347,6 +507,60 @@ class Simulator(SimulatorBase):
             radius=radius,  # type: ignore
             flags=[int(newton.ParticleFlags.ACTIVE)] * n,
         )
+
+    def _add_edge_springs(
+        self, part: SourcePart, attrs: GeometryAttributes, position: np.ndarray
+    ) -> None:
+        """Join particles with bond springs along mesh edges and network contacts.
+
+        Bonds (mesh edges) are permanent: spring stiffness/damping times the
+        EDGE attributes ``bond_stiffness`` / ``bond_damping`` if present
+        (distinct names from the POINT ``stiffness``, as a mesh can't hold
+        two attributes of one name). With a network
+        cutoff, every other pair of particles closer than it is joined by a
+        contact (an elastic network model) of stiffness
+        ``spring_ke × √(sᵢ·sⱼ)``, with ``s`` the POINT ``stiffness``
+        attribute, scaled by ``domain_coupling`` unless both particles share a
+        ``domain`` ≥ 0. Contacts can break and re-form (``break_strain``).
+        Rest lengths are the starting distances.
+        """
+        ke, kd = self.props.spring_ke, self.props.spring_kd
+        bonds = attrs.edges
+        bond_k = attrs.edge_attribute("bond_stiffness")
+        bond_d = attrs.edge_attribute("bond_damping")
+        bond_k = ke * (np.ones(len(bonds)) if bond_k is None else bond_k)
+        bond_d = kd * (np.ones(len(bonds)) if bond_d is None else bond_d)
+
+        contacts = np.zeros((0, 2), dtype=np.int32)
+        if self.props.network_cutoff > 0.0:
+            contacts = network_edges(position, self.props.network_cutoff)
+            existing = {tuple(sorted(e)) for e in bonds.tolist()}
+            contacts = np.array(
+                [e for e in contacts.tolist() if tuple(e) not in existing],
+                dtype=np.int32,
+            ).reshape(-1, 2)
+        point_k = part.attributes.get("stiffness", (np.ones(part.count), ""))[0]
+        domain = part.attributes.get("domain", (np.zeros(part.count), ""))[0]
+        i, j = contacts[:, 0], contacts[:, 1]
+        same_domain = (domain[i] == domain[j]) & (domain[i] >= 0)
+        contact_k = (
+            ke
+            * np.sqrt(point_k[i] * point_k[j])
+            * np.where(same_domain, 1.0, self.props.domain_coupling)
+        )
+
+        part.edges = np.concatenate([bonds, contacts]).astype(np.int32)
+        part.bond_count = len(bonds)
+        part.spring_start = self.builder.spring_count
+        stiffness = np.concatenate([bond_k, contact_k])
+        damping = np.concatenate([bond_d, np.full(len(contacts), kd)])
+        for (a, b), k, d in zip(
+            (part.edges + part.start).tolist(),
+            stiffness.tolist(),
+            damping.tolist(),
+            strict=True,
+        ):
+            self.builder.add_spring(a, b, k, d, 0.0)
 
     def _add_curve_springs(self, part: SourcePart) -> None:
         """Connect the points of each curve with stretch and bend springs.
@@ -559,6 +773,56 @@ class Simulator(SimulatorBase):
     # Physics Simulation (State → Solver → Updated State)
     # ============================================================================
 
+    def _update_network_contacts(self) -> None:
+        """Break over-stretched network contacts and re-form relaxed ones."""
+        if self._contact_ids is None:
+            return
+        wp.launch(
+            kernels.update_network_contacts,
+            dim=len(self._contact_ids),
+            inputs=[
+                self._contact_ids,
+                self.model.spring_indices,
+                self.model.spring_rest_length,
+                self._contact_ke,
+                self.state_0.particle_q,
+                self.props.break_strain,
+                self.props.reform_strain,
+            ],
+            outputs=[self._contact_broken, self.model.spring_stiffness],
+            device=self.model.device,
+        )
+
+    @property
+    def broken_springs(self) -> np.ndarray:
+        """Boolean per model spring: a network contact that is currently broken."""
+        broken = np.zeros(self.model.spring_count, dtype=bool)
+        if self._contact_ids is not None and self._contact_broken is not None:
+            broken[self._contact_ids.numpy()] = self._contact_broken.numpy() == 1
+        return broken
+
+    def _apply_thermostat(self, dt: float) -> None:
+        """Langevin drag + thermal noise on particles (``temperature``/``drag``)."""
+        drag, kT = self.props.drag, self.props.temperature
+        if self.model.particle_count == 0 or drag <= 0.0:
+            return
+        self._noise_seed += 1
+        wp.launch(
+            kernels.langevin_forces,
+            dim=self.model.particle_count,
+            inputs=[
+                self.state_0.particle_qd,
+                self.model.particle_mass,
+                self.model.particle_flags,
+                drag,
+                kT,
+                dt,
+                self._noise_seed,
+            ],
+            outputs=[self.state_0.particle_f],
+            device=self.model.device,
+        )
+
     def simulate(self):
         """Execute one physics timestep following Newton's pattern:
         State → Solver → Updated State
@@ -568,11 +832,14 @@ class Simulator(SimulatorBase):
         for i in range(substeps):
             self._apply_rigid_scales((i + 1) / substeps)
             self.state_0.clear_forces()
+            self._apply_thermostat(sim_dt)
             self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(
                 self.state_0, self.state_1, self.control, self.contacts, sim_dt
             )
             self.state_0, self.state_1 = self.state_1, self.state_0
+            self._project_to_surface()
+            self._update_network_contacts()
 
     # def _get_manual_body_transforms(self) -> dict[int, np.ndarray]:
     #     """Get transforms of manually-controlled bodies before physics solve."""
@@ -643,6 +910,12 @@ class Simulator(SimulatorBase):
                 part.output = self._rebuild_output(obj, part, pos)
             else:
                 part.output = self._new_output(name, part, pos)
+            for attr_name, (values, data_type) in part.attributes.items():
+                part.output.store_named_attribute(
+                    values,
+                    attr_name,
+                    atype=data_type,  # ty: ignore[invalid-argument-type]
+                )
             part.output.store_named_attribute(radius[part.indices], "radius")
             if self._pinned_indices is not None:
                 part.output.store_named_attribute(pinned[part.indices], "pinned")
@@ -662,9 +935,13 @@ class Simulator(SimulatorBase):
             return db.BlenderObject.from_curves(
                 pos, part.curve_sizes, name=name, collection=collection
             )
-        if part.is_cloth:
+        if part.object_type == "MESH":
             return db.BlenderObject.from_mesh(
-                pos, faces=part.faces, name=name, collection=collection
+                pos,
+                edges=None if part.is_cloth else part.edges,
+                faces=part.faces or None,
+                name=name,
+                collection=collection,
             )
         return db.BlenderObject.from_pointcloud(pos, name=name, collection=collection)
 
@@ -676,7 +953,11 @@ class Simulator(SimulatorBase):
         bob = db.BlenderObject(obj)
         data = obj.data
         if isinstance(data, bpy.types.Mesh):
-            bob.new_from_pydata(pos, faces=part.faces)
+            bob.new_from_pydata(
+                pos,
+                edges=None if part.is_cloth else part.edges,
+                faces=part.faces or None,
+            )
             return bob
         if isinstance(data, bpy.types.Curves):
             assert part.curve_sizes is not None
@@ -694,11 +975,43 @@ class Simulator(SimulatorBase):
             return
         positions = self.particle_positions
         velocity = self.velocity
+        broken = self.broken_springs if self._contact_ids is not None else None
+        normal = None
+        if self._surface_mesh is not None and self._surface_indices is not None:
+            normal = np.zeros((self.model.particle_count, 3), dtype=np.float32)
+            normal[self._surface_indices.numpy()] = self._surface_normal.numpy()
         for part in self.parts:
             if part.output is None:
                 continue
             part.output.position = positions[part.indices]  # type: ignore[assignment]
             part.output.store_named_attribute(velocity[part.indices], "velocity")
+            if normal is not None:
+                part.output.store_named_attribute(
+                    normal[part.indices], "surface_normal"
+                )
+            if part.edges is not None and len(part.edges) and not part.is_cloth:
+                self._update_edge_outputs(part, positions, broken)
+
+    def _update_edge_outputs(
+        self, part: SourcePart, positions: np.ndarray, broken: np.ndarray | None
+    ) -> None:
+        """Store per-edge ``strain`` and ``broken`` on a network output mesh.
+
+        Output edges are in spring order, so GN can colour or hide them.
+        """
+        assert part.output is not None and part.edges is not None
+        assert self._spring_rest is not None
+        springs = slice(part.spring_start, part.spring_start + len(part.edges))
+        q = positions[part.edges + part.start]
+        length = np.linalg.norm(q[:, 0] - q[:, 1], axis=1)
+        strain = length / self._spring_rest[springs] - 1.0
+        part.output.store_named_attribute(
+            strain.astype(np.float32), "strain", domain="EDGE"
+        )
+        if broken is not None:
+            part.output.store_named_attribute(
+                broken[springs], "broken", atype="BOOLEAN", domain="EDGE"
+            )
 
     # ============================================================================
     # Main Simulation Loop
@@ -730,6 +1043,7 @@ class Simulator(SimulatorBase):
             self._update_simulation_from_blender()
             self._update_rigid_scales()
             self._update_pinned_particles()
+            self._update_surface()
             start_simulate = time.time()
             self.simulate()
             self.props.time_compute = time.time() - start_simulate

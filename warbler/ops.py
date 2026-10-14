@@ -1,5 +1,6 @@
 from typing import ClassVar
 
+import bpy
 from bpy.props import EnumProperty
 from bpy.types import Context, Operator
 
@@ -88,6 +89,53 @@ class WB_OT_FreeSimulation(BaseOperator):
         return ReturnValues.FINISHED
 
 
+class WB_OT_AddProteinNetwork(BaseOperator):
+    bl_idname = "wb.add_protein_network"
+    bl_label = "Protein Elastic Network"
+    bl_description = (
+        "Simulate the active Molecular Nodes molecule as an elastic network of "
+        "its alpha carbons, jiggling with thermal noise"
+    )
+    bl_options = {"REGISTER", "UNDO"}  # noqa: RUF012
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if obj is None or not isinstance(obj.data, bpy.types.Mesh):
+            cls.poll_message_set("Select a Molecular Nodes molecule")
+            return False
+        if "is_alpha_carbon" not in obj.data.attributes:
+            cls.poll_message_set("Active object has no 'is_alpha_carbon' attribute")
+            return False
+        return True
+
+    def execute(self, context):
+        molecule = context.active_object
+        assert molecule is not None
+        plddt = demos.has_plddt(molecule)
+        sim = demos.protein_network(context, molecule, plddt=plddt)
+        try:
+            sim.compile()
+        except Exception as e:  # noqa: BLE001 — report any compile failure in the UI
+            self.report(ReportValues.ERROR, f"Unable to compile, error: {e}")  # type: ignore
+            return ReturnValues.CANCELLED
+        context.view_layer.objects.active = molecule
+        if sim.model.particle_count == 0:
+            self.report(
+                ReportValues.WARNING,  # type: ignore
+                "No alpha carbons found. A styled molecule needs its atoms in an "
+                "'MN/Atoms' bundle (e.g. styles applied with Evaluate on Atoms)",
+            )
+            return ReturnValues.FINISHED
+        self.report(
+            ReportValues.INFO,  # type: ignore
+            "Domains from AlphaFold pLDDT"
+            if plddt
+            else "No pLDDT found (not AlphaFold?): one uniform network",
+        )
+        return ReturnValues.FINISHED
+
+
 class WB_OT_RemoveSimulation(BaseOperator):
     bl_idname = "wb.remove_simulation"
     bl_label = "Remove Simulation"
@@ -134,4 +182,5 @@ CLASSES = [
     WB_OT_CompileSimulation,
     WB_OT_FreeSimulation,
     WB_OT_AddDemo,
+    WB_OT_AddProteinNetwork,
 ]

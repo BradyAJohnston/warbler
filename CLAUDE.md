@@ -93,6 +93,8 @@ Warbler reads these named attributes from geometry at compile time:
 | `mass` | `FLOAT` | Per-particle mass |
 | `radius` | `FLOAT` | Collision radius |
 | `pinned` | `BOOLEAN` | `True` → kinematic (sets `ParticleFlags` to 0, position driven by GN each frame) |
+| `on_surface` | `BOOLEAN` | Held on the simulation's `surface` mesh (all unpinned particles if absent and a surface is set) |
+| `surface_offset` | `FLOAT` | Distance along the surface normal to hold the particle at (e.g. ± half a bilayer) |
 
 These are read on the POINT domain of every component (points, curve points, mesh vertices). `pinned=True` sets mass 0 and `ParticleFlags` 0. Pin positions are re-read from GN every frame (for all parts) so animated pins work — see the ropes demo.
 
@@ -113,6 +115,14 @@ Test files:
 - `test_demos.py` — each demo checked against its Newton example's `test_final` criteria; mixed-component source; demo operator
 
 Demos (`warbler/demos.py`) reproduce Newton examples with the geometry built in GN via nodebpy: particle grid (`add_particle_grid` from `example_xpbd_vbd_coupled_solver`), hanging cloth (`example_cloth_hanging`, VBD), hanging ropes (spring chains with GN-animated pins — Newton's own cables use `add_rod` rigid bodies instead). They set scene fps to 60 to match Newton's timing.
+
+**Protein elastic network** (`demos.protein_network`, operator `wb.add_protein_network` on the active MN molecule, `tests/test_protein.py`): GN picks chain-A Cα atoms via MN's `is_alpha_carbon` attribute (not MN's Python classes — MN as an extension isn't importable as `molecularnodes`); springs come from `network_cutoff` (`simulation.network_edges`, compile-time, exact). Mesh edges always become permanent bond springs (EDGE `bond_stiffness`/`bond_damping` multipliers — not `stiffness`, which is the POINT contact multiplier; a mesh can't hold both). All source POINT attributes are copied to outputs, so MN styles can run on the simulated mesh. Thermostat: `kernels.langevin_forces` (`temperature` = kT, `drag` = 1/s) added to `particle_f` each substep. Defaults at MN's 0.1 BU/Å: cutoff 0.8, ke 1e3, kT 10, drag 5 → ~1 Å RMSD jiggle. MN is a dev-only dep, pinned to a git commit until 520.3.0 is on PyPI. Test structures are downloaded with `mn.Molecule.fetch` into `tests/.cache/` (gitignored) on first run — never commit structure files.
+
+Domains & unfolding: the protein tree joins consecutive Cα by mesh edges (bonds, `bond_stiffness` 20× — weaker bonds tear before contacts break), and with "Domains from pLDDT" (auto-on via `demos.has_plddt`: AlphaFold writes one value per residue to all its atoms) smooths `b_factor ≥ 70` over ±3 residues, numbering confident runs as `domain` (else -1, `stiffness` 0.05). Contact k = `spring_ke·√(sᵢsⱼ)`, × `domain_coupling` unless same domain ≥ 0. `kernels.update_network_contacts` runs every substep: contact stiffness → 0 above `break_strain` (XPBD skips ke ≤ 0), restored below `reform_strain`. Output mesh edges are in spring order with EDGE `strain`/`broken`. "Pull" modifier input moves pinned termini apart live. Test models: 4AKE (RCSB), AlphaFold P0DP23 (calmodulin) and P04637 (p53), via `fetch(..., database="alphafold")` in `test_protein.py` (MN goes through biotite; AFDB 403s plain curl).
+
+**Membrane fusion** (`demos.membrane_fusion`): the `surface` prop is a mesh object re-read and rebuilt as a `wp.Mesh` every frame (`_update_surface`; rebuilt, not refit, since remeshes change topology). `kernels.project_to_surface` runs after every substep: closest point + interpolated vertex normal × `surface_offset`, normal velocity removed; outputs get `surface_normal`. The demo surface is a smooth-min SDF of two spheres in a Volume Cube → Volume to Mesh (background must be negative, else the cube walls become surface), radius grown to keep area. The lipid source scatters on the surface via Object Info but holds the result in a pass-through simulation zone, so it's scattered once (re-scattering the animated surface every frame cost ~40 ms). Settings from the user's tuned example: lipid radius 0.044 with Poisson distance min = radius (starts over-packed, contacts spread it into a fluid — sparse packing clumped instead), temperature 0.02, drag 5 → ~23% of lipids cross vesicles by frame 400.
+
+MN's `BuildElasticNetwork` group (MN main @ 9059f03) outputs points up to 1.5 Å off the real Cα positions with mismatched `res_id`s — don't use it as a source until fixed.
 
 Blender 5.2: GN modifier inputs are no longer ID properties — use `getattr(mod.properties.inputs, socket.identifier).value`.
 

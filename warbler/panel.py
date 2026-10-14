@@ -5,6 +5,7 @@ from .geometryset import GeometrySet
 from .manager import get_manager
 from .ops import (
     WB_OT_AddDemo,
+    WB_OT_AddProteinNetwork,
     WB_OT_AddSimulation,
     WB_OT_CompileSimulation,
     WB_OT_FreeSimulation,
@@ -149,11 +150,27 @@ class WB_PT_WarblerPanel(Panel):
         col = row.column()
         col.operator(WB_OT_AddSimulation.bl_idname, text="", icon="ADD")
         col.operator(WB_OT_RemoveSimulation.bl_idname, text="", icon="REMOVE")
-        layout.operator_menu_enum(WB_OT_AddDemo.bl_idname, "demo", icon="NODETREE")
 
         try:
             item = man.active_item
         except IndexError:
+            item = None
+
+        if item is not None:
+            row = layout.row()
+            row.scale_y = 2
+            row.operator(
+                WB_OT_CompileSimulation.bl_idname,
+                text="Compile" if not item.is_compiled else "Re-Compile",
+            )
+            if item.is_compiled:
+                row.operator(WB_OT_FreeSimulation.bl_idname, icon="CANCEL")
+
+        row = layout.row(align=True)
+        row.operator_menu_enum(WB_OT_AddDemo.bl_idname, "demo", icon="NODETREE")
+        row.operator(WB_OT_AddProteinNetwork.bl_idname, icon="RNA")
+
+        if item is None:
             return
 
         col = layout.column()
@@ -187,6 +204,7 @@ class WB_PT_WarblerPanel(Panel):
         if panel:
             col = panel.column()
             col.prop(item, "source", text="Object")
+            col.prop(item, "surface")
             if item.source is not None:
                 draw_geometry_info(
                     col,
@@ -197,12 +215,24 @@ class WB_PT_WarblerPanel(Panel):
 
             header, panel = create_panel(panel, "spring", default_closed=True)
             if header:
-                header.label(text="Curves")
+                header.label(text="Springs")
             if panel:
                 col = panel.column()
                 col.prop(item, "spring_ke")
                 col.prop(item, "spring_kd")
                 col.prop(item, "bend_ke")
+                col.prop(item, "network_cutoff")
+                col.prop(item, "domain_coupling")
+                col.prop(item, "break_strain")
+                col.prop(item, "reform_strain")
+
+        header, panel = create_panel(layout, "forces", default_closed=True)
+        header.label(text="Forces")
+        if panel:
+            col = panel.column()
+            col.prop(item, "gravity")
+            col.prop(item, "temperature")
+            col.prop(item, "drag")
 
         header, panel = create_panel(layout, "cloth", default_closed=True)
         header.label(text="Cloth")
@@ -229,14 +259,26 @@ class WB_PT_WarblerPanel(Panel):
             col = panel.column()
             col.prop(item, "sim_rigid_collection")
 
-        row = layout.row()
-        row.scale_y = 2
-        row.operator(
-            WB_OT_CompileSimulation.bl_idname,
-            text="Compile" if not item.is_compiled else "Re-Compile",
-        )
-        if item.is_compiled:
-            row.operator(WB_OT_FreeSimulation.bl_idname, icon="CANCEL")
+
+def move_above_physics_panels() -> None:
+    """Draw the Warbler panel above Blender's own physics panels.
+
+    ``bl_order`` can't go below 0 and panels of equal order draw in the order
+    they were registered, so Blender's physics panels (registered at startup)
+    are re-registered after Warbler's, parents first as listed.
+    """
+    panels = [
+        cls
+        for cls in bpy.types.Panel.__subclasses__()
+        if cls.__module__.startswith("bl_ui.")
+        and getattr(cls, "bl_space_type", None) == "PROPERTIES"
+        and getattr(cls, "bl_context", None) == "physics"
+        and cls.is_registered
+    ]
+    for cls in reversed(panels):
+        bpy.utils.unregister_class(cls)
+    for cls in panels:
+        bpy.utils.register_class(cls)
 
 
 CLASSES = [WB_PT_WarblerPanel, WB_UL_RigidBodyCollection]

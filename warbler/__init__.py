@@ -11,6 +11,7 @@ CLASSES = ops.CLASSES + props.CLASSES + panel.CLASSES
 def register():
     for cls in CLASSES:
         register_class(cls)
+    panel.move_above_physics_panels()
     bpy.types.Scene.SimulationManager = manager.SimulationManager()  # type: ignore
     bpy.types.Object.wb = PointerProperty(type=props.WarblerObjectProperties)  # type: ignore
     bpy.types.Scene.wb = PointerProperty(type=props.WarblerSceneProperties)  # type: ignore

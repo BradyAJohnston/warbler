@@ -12,15 +12,6 @@ from warbler.simulation import Simulator
 from warbler.utils import get_scene
 
 
-def _set_input(obj: bpy.types.Object, name: str, value) -> None:
-    """Set a GN modifier input by its interface name."""
-    mod = obj.modifiers["Warbler Source"]
-    assert isinstance(mod, bpy.types.NodesModifier) and mod.node_group is not None
-    identifier = mod.node_group.interface.items_tree[name].identifier  # ty: ignore[unresolved-attribute]
-    getattr(mod.properties.inputs, identifier).value = value  # ty: ignore[unresolved-attribute]
-    obj.update_tag()
-
-
 def _run(sim: Simulator, frames: int) -> np.ndarray:
     scene = get_scene()
     scene.frame_set(1)
@@ -40,7 +31,7 @@ def test_particle_grid():
     assert source is not None
     # Newton's exact grid: 5 x 5 x 3 points
     for name, value in (("Dim X", 5), ("Dim Y", 5), ("Dim Z", 3)):
-        _set_input(source, name, value)
+        demos.set_modifier_input(source, name, value)
 
     q0 = None
     sim.compile()
@@ -179,7 +170,7 @@ def test_recompile_reuses_output_objects():
     sim = demos.particles(bpy.context)
     source = sim.props.source
     assert source is not None
-    _set_input(source, "Dim Z", 2)
+    demos.set_modifier_input(source, "Dim Z", 2)
     sim.compile()
     out = sim.parts[0].output
     assert out is not None
@@ -188,7 +179,7 @@ def test_recompile_reuses_output_objects():
     assert len(out) == 16 * 16 * 2
 
     # Topology change: more points from the same source
-    _set_input(source, "Dim Z", 3)
+    demos.set_modifier_input(source, "Dim Z", 3)
     sim.compile()
     out = sim.parts[0].output
     assert out is not None

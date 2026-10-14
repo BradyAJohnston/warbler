@@ -10,6 +10,8 @@ import math
 from collections.abc import Callable
 
 import bpy
+import databpy as db
+import numpy as np
 from nodebpy import geometry as g
 
 from .manager import get_manager
@@ -32,6 +34,17 @@ def _source_object(name: str, tree: bpy.types.GeometryNodeTree) -> bpy.types.Obj
     # wireframe reference so it doesn't hide them.
     obj.display_type = "WIRE"
     return obj
+
+
+def set_modifier_input(obj: bpy.types.Object, name: str, value) -> None:
+    """Set an input of the source's GN modifier by its interface name."""
+    mod = obj.modifiers["Warbler Source"]
+    assert isinstance(mod, bpy.types.NodesModifier) and mod.node_group is not None
+    interface = mod.node_group.interface
+    assert interface is not None
+    item = interface.items_tree[name]
+    getattr(mod.properties.inputs, item.identifier).value = value  # ty: ignore[unresolved-attribute]
+    obj.update_tag()
 
 
 def _new_simulation(context: bpy.types.Context, source: bpy.types.Object) -> Simulator:
@@ -208,6 +221,304 @@ def ropes(context: bpy.types.Context) -> Simulator:
     return sim
 
 
+# ============================================================================
+# Membrane fusion — lipids held on a remeshed surface
+# ============================================================================
+
+
+def fusing_vesicles_tree() -> bpy.types.GeometryNodeTree:
+    """Two spherical vesicles that fuse between two frames.
+
+    The membrane is the zero level set of a smooth union of two sphere SDFs,
+    remeshed every frame: as the centres approach and the smoothing grows, a
+    neck forms and widens until one vesicle is left.
+    """
+    with g.tree("Warbler Fusing Vesicles", clear=True, is_modifier=True) as tree:
+        radius = tree.inputs.float("Radius", 1.0, min_value=0.01)
+        gap = tree.inputs.float("Gap", 0.2, min_value=0.0)
+        start = tree.inputs.float("Start Frame", 30.0)
+        end = tree.inputs.float("End Frame", 330.0)
+        overlap = tree.inputs.float("Overlap", 0.6, min_value=0.0, max_value=1.0)
+        smoothing = tree.inputs.float("Smoothing", 0.6, min_value=0.0)
+        resolution = tree.inputs.integer("Resolution", 48, min_value=8)
+
+        fusion = g.MapRange.float(
+            g.SceneTime().o.frame, start, end, interpolation_type="SMOOTHSTEP"
+        )
+        apart = radius + gap / 2
+        offset = apart + (radius * (1 - overlap) - apart) * fusion
+        centre = g.CombineXYZ(x=offset)
+        # Grow the spheres as they overlap so the membrane keeps its area
+        # (4πr(r + d) for two spheres of radius r with centres ±d), else the
+        # lipids end up packed onto a ~30% smaller surface.
+        grown = g.Math.maximum(
+            radius,
+            (g.Math.square_root(offset * offset + radius * radius * 8) - offset) / 2,
+        )
+        position = g.Position().o.position
+        sdf = g.Math.smooth_minimum(
+            g.VectorMath.length(position - centre) - grown,
+            g.VectorMath.length(position + centre) - grown,
+            fusion * smoothing * radius,
+        )
+        # Bounds of the separated vesicles and the grown fused one, plus a
+        # margin for the remesh
+        half = radius * 1.4
+        # Background is "outside", so the cube's walls don't make a surface
+        volume = g.VolumeCube(
+            density=-sdf,
+            background=-1.0,
+            min=g.CombineXYZ(-(apart + half), -half, -half),
+            max=g.CombineXYZ(apart + half, half, half),
+            resolution_x=resolution * 2,
+            resolution_y=resolution,
+            resolution_z=resolution,
+        )
+        (
+            g.VolumeToMesh(volume, threshold=0.0, adaptivity=0.0)
+            >> g.SetShadeSmooth()
+            >> tree.outputs.geometry("Geometry")
+        )
+    return tree.tree
+
+
+def membrane_lipids_tree(surface: bpy.types.Object) -> bpy.types.GeometryNodeTree:
+    """Lipid points spread evenly over ``surface``, tagged ``on_surface``.
+
+    The scatter is held in a simulation zone, so it's made once on the first
+    frame from the real surface and not re-run as the surface changes (a
+    Poisson scatter every frame costs ~40 ms). ``vesicle`` records which
+    vesicle each lipid started on, so their mixing after fusion can be
+    coloured.
+    """
+    with g.tree("Warbler Membrane Lipids", clear=True, is_modifier=True) as tree:
+        radius = tree.inputs.float("Radius", 0.044, min_value=0.001)
+        mass = tree.inputs.float("Mass", 1.0, min_value=0.0)
+
+        scatter = g.DistributePointsOnFaces(
+            g.ObjectInfo(surface).o.geometry,
+            distance_min=radius,
+            density_max=1.0e4,
+            distribute_method="POISSON",
+        )
+        cache = g.SimulationZone()
+        lipids = cache.items.geometry(scatter, "Lipids")
+        lipids.current >> lipids.next
+        (
+            lipids.result
+            >> g.StoreNamedAttribute.point.float(name="radius", value=radius)
+            >> g.StoreNamedAttribute.point.float(name="mass", value=mass)
+            >> g.StoreNamedAttribute.point.boolean(name="on_surface", value=True)
+            >> g.StoreNamedAttribute.point.integer(
+                name="vesicle", value=g.Position().o.position.x > 0
+            )
+            >> tree.outputs.geometry("Geometry")
+        )
+    return tree.tree
+
+
+def _vesicle_material() -> bpy.types.Material:
+    """Colour lipids by the ``vesicle`` they started on."""
+    mat = bpy.data.materials.get("Warbler Vesicle")
+    if mat is not None:
+        return mat
+    mat = bpy.data.materials.new("Warbler Vesicle")
+    tree = mat.node_tree
+    assert tree is not None
+    bsdf = tree.nodes["Principled BSDF"]
+    attribute = tree.nodes.new("ShaderNodeAttribute")
+    attribute.attribute_name = "vesicle"  # ty: ignore[unresolved-attribute]
+    mix = tree.nodes.new("ShaderNodeMix")
+    mix.data_type = "RGBA"  # ty: ignore[unresolved-attribute]
+    mix.inputs[6].default_value = (0.1, 0.45, 0.9, 1.0)  # ty: ignore[unresolved-attribute]
+    mix.inputs[7].default_value = (0.95, 0.45, 0.1, 1.0)  # ty: ignore[unresolved-attribute]
+    tree.links.new(attribute.outputs["Fac"], mix.inputs["Factor"])
+    tree.links.new(mix.outputs[2], bsdf.inputs["Base Color"])
+    return mat
+
+
+def membrane_fusion(context: bpy.types.Context) -> Simulator:
+    """Lipids diffusing on two vesicles as they fuse (XPBD + surface projection)."""
+    surface = _source_object("FusingVesicles", fusing_vesicles_tree())
+    source = _source_object("MembraneLipids", membrane_lipids_tree(surface))
+    # The output is matched by name on compile, so the colour survives.
+    name = f"{source.name}_points"
+    output = bpy.data.objects.get(name)
+    if output is None:
+        output = bpy.data.objects.new(name, bpy.data.pointclouds.new(name))
+        get_scene().collection.objects.link(output)
+    output.data.materials.clear()  # ty: ignore[unresolved-attribute]
+    output.data.materials.append(_vesicle_material())  # ty: ignore[unresolved-attribute]
+
+    sim = _new_simulation(context, source)
+    item = sim.props
+    item.solver = "XPBD"
+    item.surface = surface
+    item.gravity = 0.0
+    item.use_ground_plane = False
+    item.temperature = 0.02
+    item.drag = 5.0
+    get_scene().frame_end = 400
+    return sim
+
+
+# ============================================================================
+# Protein — elastic network model on a Molecular Nodes molecule
+# ============================================================================
+
+
+# Residues either side averaged when smoothing pLDDT confidence, so short dips
+# inside a domain don't split it in two.
+PLDDT_WINDOW = 3
+
+
+def protein_network_tree(molecule: bpy.types.Object) -> bpy.types.GeometryNodeTree:
+    """Alpha carbons of one chain as beads on a backbone, tagged for the network.
+
+    Beads keep every Molecular Nodes attribute and their exact atom positions.
+    Consecutive residues are joined by mesh edges (permanent backbone bonds,
+    "Backbone Stiffness" times stiffer than contacts so pulling unfolds the
+    protein rather than tearing the chain); contacts come from the
+    simulation's network cutoff. Beads are picked with
+    the ``is_alpha_carbon`` attribute Molecular Nodes stores on atoms (read
+    from the "MN/Atoms" bundle when a style is applied), so this
+    doesn't need to import Molecular Nodes (which as a Blender extension isn't
+    importable as ``molecularnodes``).
+
+    With "Domains from pLDDT", AlphaFold's per-residue confidence (stored in
+    ``b_factor``) is smoothed over ±``PLDDT_WINDOW`` residues; each confident
+    run becomes a ``domain`` and low-confidence residues get ``domain`` -1 and
+    a soft ``stiffness``. "Pull" moves the pinned termini apart along the line
+    between them, for unfolding the protein live.
+    """
+    with g.tree("Warbler Protein Network", clear=True, is_modifier=True) as tree:
+        chain = tree.inputs.integer("Chain", 0, min_value=0)
+        mass = tree.inputs.float("Mass", 1.0, min_value=0.0)
+        radius = tree.inputs.float("Radius", 0.14, min_value=0.001)
+        use_plddt = tree.inputs.boolean("Domains from pLDDT", True)
+        threshold = tree.inputs.float("pLDDT Threshold", 70.0)
+        soft = tree.inputs.float("Disordered Stiffness", 0.05, min_value=0.0)
+        bond_stiffness = tree.inputs.float("Backbone Stiffness", 20.0, min_value=0.0)
+        pin_termini = tree.inputs.boolean("Pin Termini", True)
+        pull = tree.inputs.float("Pull", 0.0)
+
+        # When the molecule's output carries its atoms in the geometry bundle
+        # under "MN/Atoms" (as Molecular Nodes' "Evaluate on Atoms" writes and
+        # "Get Geometry Atoms" reads), use those; otherwise the geometry is the
+        # atoms. Object Info's transform isn't applied to bundle contents.
+        info = g.ObjectInfo(molecule, transform_space="RELATIVE")
+        bundle = g.GetGeometryBundle(info.o.geometry)
+        bundled = g.GetBundleItem.geometry(bundle.o.bundle, "MN/Atoms")
+        bundled_atoms = g.TransformGeometry(
+            bundled.o.item, mode="Matrix", transform=info.o.transform
+        )
+        atoms = bundled.o.exists.switch.geometry(bundle.o.geometry, bundled_atoms)
+        in_chain = g.NamedAttribute.integer("chain_id") == chain
+        is_ca = g.NamedAttribute.boolean("is_alpha_carbon")
+        backbone = (
+            g.SeparateGeometry.point(atoms, is_ca & in_chain).o.selection
+            >> g.MeshToPoints()
+            >> g.PointsToCurves(weight=g.NamedAttribute.integer("res_id"))
+            >> g.CurveToMesh()
+        )
+
+        idx = g.Index()
+        last = g.DomainSize(backbone).o.point_count - 1
+
+        # Confident residues, smoothed by a majority vote over the window
+        plddt = g.Math.greater_than(
+            g.NamedAttribute.float("b_factor"), threshold
+        ).o.value
+        votes = plddt.point.at(idx - PLDDT_WINDOW)
+        for k in range(-PLDDT_WINDOW + 1, PLDDT_WINDOW + 1):
+            votes = votes + plddt.point.at(idx + k)
+        confident = use_plddt.switch.boolean(True, votes > PLDDT_WINDOW + 0.5)
+
+        # Number each confident run: a run starts where the previous bead isn't
+        previous = confident.point.at(idx - 1)
+        start = confident & (~previous | (idx == 0))
+        run = g.AccumulateField.point.integer(start).o.leading
+        domain = confident.switch.integer(-1, run - 1)
+        stiffness = confident.switch.float(soft, 1.0)
+
+        # Pinned termini, pulled apart along the line between them
+        position = g.Position().o.position
+        first_pos = position.point.at(0)
+        last_pos = position.point.at(last)
+        direction = (last_pos - first_pos).normalize()
+        is_last = idx == last
+        is_end = (idx == 0) | is_last
+        sign = g.Switch.float(is_last, -0.5, 0.5)
+        pulled = g.SetPosition(
+            backbone, selection=is_end, offset=direction * (pull * sign)
+        )
+
+        (
+            pulled
+            >> g.StoreNamedAttribute.point.boolean(
+                name="pinned", value=pin_termini & is_end
+            )
+            >> g.StoreNamedAttribute.point.integer(name="domain", value=domain)
+            >> g.StoreNamedAttribute.point.float(name="stiffness", value=stiffness)
+            >> g.StoreNamedAttribute.edge.float(
+                name="bond_stiffness", value=bond_stiffness
+            )
+            >> g.StoreNamedAttribute.point.float(name="mass", value=mass)
+            >> g.StoreNamedAttribute.point.float(name="radius", value=radius)
+            >> tree.outputs.geometry("Geometry")
+        )
+    return tree.tree
+
+
+def has_plddt(molecule: bpy.types.Object) -> bool:
+    """Whether the molecule's ``b_factor`` looks like AlphaFold pLDDT.
+
+    AlphaFold writes one pLDDT per residue to every atom in it; crystal
+    B-factors vary between atoms of a residue (backbone vs side chain).
+    """
+    b = db.named_attribute(molecule, "b_factor")
+    residue = db.named_attribute(molecule, "chain_id").astype(
+        np.int64
+    ) * 1_000_000 + db.named_attribute(molecule, "res_id")
+    _, inverse = np.unique(residue, return_inverse=True)
+    high = np.full(inverse.max() + 1, -np.inf)
+    low = np.full(inverse.max() + 1, np.inf)
+    np.maximum.at(high, inverse, b)
+    np.minimum.at(low, inverse, b)
+    return bool(np.mean(high - low < 1e-3) > 0.95)
+
+
+def protein_network(
+    context: bpy.types.Context,
+    molecule: bpy.types.Object,
+    plddt: bool | None = None,
+) -> Simulator:
+    """A floating protein held together by an elastic network, jiggling thermally.
+
+    Lengths assume Molecular Nodes' default scale of 0.1 Blender units per Å:
+    an 8 Å network cutoff and 1.4 Å bead radius. ``plddt`` turns on domains
+    from AlphaFold confidence; by default it's detected with ``has_plddt``.
+    """
+    source = _source_object(f"{molecule.name}_network", protein_network_tree(molecule))
+    if plddt is None:
+        plddt = has_plddt(molecule)
+    set_modifier_input(source, "Domains from pLDDT", plddt)
+    sim = _new_simulation(context, source)
+    item = sim.props
+    item.solver = "XPBD"
+    item.gravity = 0.0
+    item.use_ground_plane = False
+    item.network_cutoff = 0.8
+    item.spring_ke = 1.0e3
+    item.spring_kd = 1.0
+    item.temperature = 10.0
+    item.drag = 5.0
+    item.domain_coupling = 0.1
+    item.break_strain = 0.5
+    item.reform_strain = 0.25
+    return sim
+
+
 DEMOS: dict[str, tuple[str, str, Callable[[bpy.types.Context], Simulator]]] = {
     "PARTICLES": ("Particle Grid", "Jittered block of particles (XPBD)", particles),
     "CLOTH": ("Hanging Cloth", "Newton's example_cloth_hanging (VBD)", cloth),
@@ -215,5 +526,10 @@ DEMOS: dict[str, tuple[str, str, Callable[[bpy.types.Context], Simulator]]] = {
         "Hanging Ropes",
         "Curves as spring chains with animated pins (XPBD)",
         ropes,
+    ),
+    "MEMBRANE_FUSION": (
+        "Membrane Fusion",
+        "Lipids held on two fusing vesicles by surface projection (XPBD)",
+        membrane_fusion,
     ),
 }

@@ -58,6 +58,72 @@ class SimulationListItem(bpy.types.PropertyGroup):
         default="cuda",
     )
     use_ground_plane: BoolProperty("Ground Plane", default=True)  # type: ignore
+    gravity: FloatProperty(  # type: ignore
+        name="Gravity",
+        description="Gravity along the Z axis. 0 for floating molecules",
+        default=-9.81,
+        unit="ACCELERATION",
+    )
+    network_cutoff: FloatProperty(  # type: ignore
+        name="Network Cutoff",
+        description=(
+            "Join every pair of particles (from point clouds and face-less meshes) "
+            "closer than this with a spring at compile time, building an elastic "
+            "network. 0 disables it; mesh edges always become springs"
+        ),
+        default=0.0,
+        min=0.0,
+        unit="LENGTH",
+    )
+    domain_coupling: FloatProperty(  # type: ignore
+        name="Domain Coupling",
+        description=(
+            "Stiffness factor for network contacts between different `domain`s "
+            "(or involving domain -1). Low values let domains move as rigid "
+            "bodies on soft hinges"
+        ),
+        default=0.1,
+        min=0.0,
+        soft_max=1.0,
+    )
+    break_strain: FloatProperty(  # type: ignore
+        name="Break Strain",
+        description=(
+            "Network contacts stretched past this fraction of their rest length "
+            "break (bonds from mesh edges never do). 0 disables breaking"
+        ),
+        default=0.0,
+        min=0.0,
+        subtype="FACTOR",
+    )
+    reform_strain: FloatProperty(  # type: ignore
+        name="Re-form Strain",
+        description=(
+            "Broken network contacts re-form once back within this fraction of "
+            "their rest length, so unfolded regions can refold"
+        ),
+        default=0.25,
+        min=0.0,
+        subtype="FACTOR",
+    )
+    temperature: FloatProperty(  # type: ignore
+        name="Temperature",
+        description=(
+            "Strength of random thermal kicks on particles (kT, in mass × "
+            "length² / s²). Needs drag above 0. Visual, not physical units"
+        ),
+        default=0.0,
+        min=0.0,
+    )
+    drag: FloatProperty(  # type: ignore
+        name="Drag",
+        description=(
+            "Langevin drag on particles (1/s). Damps motion and, with "
+            "temperature, drives the thermal jiggle"
+        ),
+        default=0.0,
+        min=0.0,
+    )
     ground_plane_vector: FloatVectorProperty("Ground Normal", default=(0, 0, 1))  # type: ignore
 
     sim_rigid_collection: PointerProperty(  # type: ignore
@@ -137,6 +203,16 @@ class SimulationListItem(bpy.types.PropertyGroup):
             "Object whose evaluated geometry is simulated: point clouds become "
             "particles, curves become spring chains and meshes with faces become cloth"
         ),
+    )
+    surface: PointerProperty(  # type: ignore
+        type=Object,
+        name="Surface",
+        description=(
+            "Mesh whose evaluated geometry particles are held on, re-read every "
+            "frame. Applies to points with the 'on_surface' attribute, or all "
+            "unpinned particles if the source has none"
+        ),
+        poll=lambda self, obj: obj.type == "MESH",
     )
     source_evaluate: BoolProperty(  # type: ignore
         name="Evaluate",
