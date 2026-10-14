@@ -7,7 +7,16 @@ The core idea: GN sets up geometry and attributes → warbler reads them at comp
 
 ## GN → Simulation attributes
 
-### Currently reading (POINT domain)
+### Geometry components
+
+| GN output | Simulated as | Output object |
+|---|---|---|
+| Point cloud | free particles | `<source>_points` (point cloud) |
+| Curves | particles + stretch/bend springs along each curve | `<source>_curves` (curves) |
+| Mesh with faces | cloth (`add_cloth_mesh`) | `<source>_mesh` (mesh) |
+| Mesh without faces | free particles | `<source>_mesh` (point cloud) |
+
+### Currently reading (POINT domain, every component)
 
 | Attribute | Type | Domain | Use |
 |---|---|---|---|
@@ -53,7 +62,9 @@ Material properties below are **global** in Newton's XPBD (not per-particle). Re
 | Attribute | Type | Domain | Object |
 |---|---|---|---|
 | `position` | `FLOAT_VECTOR` | POINT | Particle point cloud |
-| `velocity` | `FLOAT_VECTOR` | POINT | Particle point cloud |
+| `velocity` | `FLOAT_VECTOR` | POINT | Every output object |
+| `radius` | `FLOAT` | POINT | Every output object (at compile) |
+| `pinned` | `BOOLEAN` | POINT | Every output object (at compile) |
 
 ### Planned
 
@@ -71,6 +82,7 @@ Material properties below are **global** in Newton's XPBD (not per-particle). Re
 | Type | Newton API | GN input | Priority |
 |---|---|---|---|
 | **Granular / MPM** | `SolverImplicitMPM` | Point cloud | medium |
+| **Rod cables** | `add_rod` + `SolverVBD` (bending/twist) | Curves | medium — matches Newton's cable examples better than spring chains |
 
 ## Rigid body shapes to add
 

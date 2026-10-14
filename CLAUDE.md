@@ -9,15 +9,15 @@ Blender add-on that bridges Geometry Nodes geometry to GPU-accelerated physics s
 ```
 GN geometry (points / mesh / curves)
         ↓  GeometrySet  (geometryset.py)
-   attributes dict
-        ↓  SimulatorXPBD.build()  (simulation.py)
+   attributes dict, per component (points / curves / mesh)
+        ↓  Simulator.build()  (simulation.py)
    newton.ModelBuilder
         ↓  .finalize()
-   newton.Model + State × 2 + SolverXPBD
+   newton.Model + State × 2 + SolverXPBD | SolverVBD
         ↓  frame_change_post handler  (manager.py)
-   SimulatorXPBD.step()  every frame
+   Simulator.step()  every frame
         ↓
-   Blender objects updated (rigid body transforms, particle pointcloud)
+   Blender objects updated (rigid body transforms, one output object per source part)
 ```
 
 ### Key files
@@ -25,7 +25,8 @@ GN geometry (points / mesh / curves)
 | File | Purpose |
 |---|---|
 | `warbler/__init__.py` | `register()` / `unregister()` — wires up classes and the frame handler |
-| `warbler/simulation.py` | `SimulatorXPBD` — the main simulation class |
+| `warbler/simulation.py` | `Simulator` — the main simulation class; `SourcePart` tracks each component's particle range + output object |
+| `warbler/demos.py` | Newton examples rebuilt as nodebpy GN trees + `WB_OT_AddDemo` entries |
 | `warbler/geometryset.py` | `GeometrySet` — evaluates GN output, reads attributes |
 | `warbler/props.py` | All Blender properties (`SimulationListItem`, `WarblerObjectProperties`) |
 | `warbler/manager.py` | `SimulationManager`, `get_manager()`, frame-change handler |
@@ -39,20 +40,30 @@ GN geometry (points / mesh / curves)
 
 ## Simulation lifecycle
 
-1. User clicks **Compile** → `WB_OT_CompileSimulation` → `SimulatorXPBD.compile()` → `build()` + `finalize()`
-2. `build()` — creates `newton.ModelBuilder`, adds rigid bodies, particles
-3. `finalize()` — calls `builder.finalize()`, creates two states, solver, contacts; creates Blender output objects (`ParticleObject`)
-4. Every frame change → `_step_simulations(scene, depsgraph)` → `SimulatorXPBD.step()`
-5. `step()` order: `_update_simulation_from_blender` → `simulate` (substep loop) → `_update_blender_from_simulation` → visualisation write-backs
+1. User clicks **Compile** → `WB_OT_CompileSimulation` → `Simulator.compile()` → `build()` + `finalize()`
+2. `build()` — creates `newton.ModelBuilder`, adds rigid bodies, then `_add_source()` splits the evaluated `props.source` by component:
+   - point cloud → free particles
+   - curves → particles + springs (`spring_ke` neighbour, `bend_ke` i→i+2)
+   - mesh with faces → `add_cloth_mesh` (mesh without faces → free particles)
+   Parts are appended in that order, so particle indices are `[points | curves | mesh]`.
+3. `finalize()` — `builder.color()` if VBD, `builder.finalize()`, two states, solver (`props.solver`), contacts
+4. `_create_outputs()` — one output object per part (`<source>_points` / `_curves` / `_mesh`) at the world origin. On re-compile an existing output (previous compile, or matched by name) with the right object type is **reused**: its data is cleared and refilled in place (`BlenderObject.new_from_pydata` for meshes, `Curves.remove_curves`/`add_curves`, `PointCloud.resize`) so modifiers and materials survive. Outputs whose component disappeared are removed.
+5. Every frame change → `_step_simulations(scene, depsgraph)` → `Simulator.step()` (only compiled sims)
+6. `step()` order: `_update_simulation_from_blender` (rigid) → `_update_pinned_particles` → `simulate` (substep loop) → `_update_blender_from_simulation` → `_update_outputs`
+
+**Free** (`WB_OT_FreeSimulation` → `Simulator.free()`) drops the model/states/solver and clears `is_compiled`, keeping the outputs, so compile-time settings (solver, device, iterations — locked in the panel while compiled) can be changed. With no live `Simulator` (e.g. after reloading a .blend) it just clears `is_compiled`.
+
+Source positions are local to the source object and moved to world space with `matrix_world` (`_world_props`).
+
+**Solver choice**: XPBD has particle-particle contact but no triangle constraint (cloth stretch comes from edge springs, which is fragile). VBD has proper membrane/bending energies but no particle-particle contact. Particles/ropes → XPBD, cloth → VBD.
 
 ---
 
 ## GeometrySet priority
 
-`GeometrySet.data` checks `eval_obj.evaluated_geometry()` in order:
-**pointcloud → curves → mesh** (GN output), then falls back to `eval_obj.data` (base object).
+`GeometrySet.points` / `.curves` / `.mesh` return `GeometryAttributes` for each component of `eval_obj.evaluated_geometry()` (or the object's own data when there is no GN output). `GeometrySet.data` / `.pointcloud` still return the first of pointcloud → curves → mesh.
 
-**Critical**: `_eval_geom` must be stored as an instance attribute. Data blocks from `evaluated_geometry()` are owned by the temporary GeometrySet and freed when it goes out of scope. Any access after losing the reference causes `ReferenceError: StructRNA of type Mesh has been removed`.
+**Critical**: data blocks from `evaluated_geometry()` are owned by the temporary GeometrySet and freed when it goes out of scope (`ReferenceError: StructRNA of type Mesh has been removed`). `GeometrySet` keeps `_eval_geom` alive, and `GeometryAttributes` holds a reference to its owning `GeometrySet`, so `GeometrySet(obj).curves.to_props()` is safe.
 
 ---
 
@@ -81,15 +92,14 @@ Warbler reads these named attributes from geometry at compile time:
 | `radius` | `FLOAT` | Collision radius |
 | `pinned` | `BOOLEAN` | `True` → kinematic (sets `ParticleFlags` to 0, position driven by GN each frame) |
 
-For particles, `pinned=True` sets `ParticleFlags` to 0 (not ACTIVE). Pin positions are re-read from GN every frame so animated pins work.
+These are read on the POINT domain of every component (points, curve points, mesh vertices). `pinned=True` sets mass 0 and `ParticleFlags` 0. Pin positions are re-read from GN every frame (for all parts) so animated pins work — see the ropes demo.
 
 ---
 
 ## Testing
 
 ```bash
-uv run pytest tests/          # all tests
-uv run pytest tests/ -v       # verbose
+BLENDER_USER_EXTENSIONS=/nonexistent uv run pytest tests/   # all tests (env var stops an installed extension's nodebpy shadowing the venv's)
 uv run pre-commit run --all-files  # ruff format + ruff check + ty check
 ```
 
@@ -98,12 +108,25 @@ Tests use `bpy` (the Python package, not a running Blender). The `clean_and_save
 Test files:
 - `test_simulation.py` — rigid body compile + dynamics
 - `test_geometryset.py` — GN attribute reading (mesh, pointcloud, vertex-only)
+- `test_demos.py` — each demo checked against its Newton example's `test_final` criteria; mixed-component source; demo operator
+
+Demos (`warbler/demos.py`) reproduce Newton examples with the geometry built in GN via nodebpy: particle grid (`add_particle_grid` from `example_xpbd_vbd_coupled_solver`), hanging cloth (`example_cloth_hanging`, VBD), hanging ropes (spring chains with GN-animated pins — Newton's own cables use `add_rod` rigid bodies instead). They set scene fps to 60 to match Newton's timing.
+
+Blender 5.2: GN modifier inputs are no longer ID properties — use `getattr(mod.properties.inputs, socket.identifier).value`.
 
 ---
 
 ## Running in Blender
 
-The add-on is loaded as an extension from `warbler/blender_manifest.toml`. Wheels are bundled under `warbler/wheels/`. For development, load the folder directly as an extension via Blender's developer mode.
+Extension metadata lives in `[tool.extbpy]` in `pyproject.toml`; [extbpy](https://github.com/BradyAJohnston/extbpy) merges it with `[project]` and `uv.lock` to generate `warbler/blender_manifest.toml` and `warbler/wheels/` (both gitignored — never edit by hand).
+
+```bash
+uvx extbpy sync      # write manifest + wheels into warbler/ for loading from source
+uvx extbpy manifest  # preview the generated manifest
+uvx extbpy build     # per-platform zips (also syncs); validates with `blender` if on PATH
+```
+
+Re-run `sync` after changing dependencies. For development, load the `warbler/` folder directly as an extension via Blender's developer mode. Tagging `v*` runs `.github/workflows/release.yml` (`extbpy build` → draft release).
 
 The blender debug session starts with `-Xfrozen_modules=off` passed to Python to make the debugger hit breakpoints.
 
@@ -111,10 +134,10 @@ The blender debug session starts with `-Xfrozen_modules=off` passed to Python to
 
 ## Known issues / watch-outs
 
-- `particle_source_evaluate` property exists in props but is not yet used — currently always evaluates
+- `source_evaluate` property exists in props but is not yet used — currently always evaluates
+- nodebpy's signatures don't accept tuples mixing numbers and sockets (`(0, 0, height)`), though they work at runtime; `demos.py` uses `# ty: ignore[invalid-argument-type]` on those lines
 - `rigid_decay_frames` prop still exists but `smooth_lerp` was removed when kinematic body handling was fixed. The prop now has no effect.
-- Spring properties (`spring_ke`, `spring_kd`, `spring_kf`) are stored on `SimulationListItem` but `_add_springs()` is empty — not yet wired up.
-- The `rigid_decay_frames` UI prop in the Rigid Bodies panel no longer does anything.
+- `spring_kf` is unused (`spring_ke` / `spring_kd` / `bend_ke` drive curve springs).
 
 ---
 
@@ -129,6 +152,4 @@ The blender debug session starts with `-Xfrozen_modules=off` passed to Python to
 4. Two-way coupling — rigid bodies reacting to particles
 
 **Cleanup:**
-- Remove `rigid_decay_frames` from the panel (or re-implement as something useful)
-- Remove `spring_ke/kd/kf` from the panel until springs are actually implemented
-- `particle_source_evaluate` should control whether GN is re-evaluated at particle read time
+- `source_evaluate` should control whether GN is re-evaluated at particle read time

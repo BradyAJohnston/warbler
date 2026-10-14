@@ -1,23 +1,30 @@
 [project]
 name = "warbler"
-version = "0.1.0"
+version = "0.0.11"
 description = "Interactive GPU simulations in Blender's viewport"
 authors = [
     {name = "Brady Johnston", email = "brady.johnston@me.com"},
 ]
+maintainers = [{ name = "Brady Johnston", email = "brady.johnston@me.com" }]
 readme = "README.md"
+license = "GPL-3.0-or-later"
 requires-python = "~=3.13.0"
 dependencies = [
-    "newton>=1.2.0",
-    "databpy>=0.7.0",
+    "newton>=1.6.0",
+    "databpy>=0.10.1",
     "nodebpy>=520.38.0",
 ]
 
+[project.urls]
+Homepage = "https://bradyajohnston.github.io/warbler"
+Repository = "https://github.com/bradyajohnston/warbler"
+Documentation = "https://bradyajohnston.github.io/warbler"
+
 [project.optional-dependencies]
-bpy =  ["bpy>=5.1.1"]
+bpy =  ["bpy>=5.2.0"]
 dev = [
     "urllib3>=2.7.0",
-    "bpy>=5.1.1",
+    "bpy>=5.2.0",
     "pytest>=9.0.3",
     "fake-bpy-module>=20260501",
     "pytest-cov",
@@ -29,6 +36,19 @@ dev = [
     "pre-commit",
 ]
 docs = ["quartodoc", "quarto-cli>=1.9", "tomlkit"]
+
+[tool.extbpy]
+# Blender-specific metadata. `extbpy build` merges this with [project] to
+# generate blender_manifest.toml and the per-platform extension zips.
+pretty_name = "Warbler"
+tagline = "Interactive GPU simulations in Blender's viewport"
+blender_version_min = "5.2.0"
+platforms = ["linux-x64", "windows-x64", "macos-arm64"]
+tags = ["3D View", "Animation", "Bake", "Physics"]
+copyright = ["2024 Brady Johnston"]
+
+[tool.extbpy.permissions]
+files = "Saving cached simulations to disk"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

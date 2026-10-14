@@ -1942,7 +1942,7 @@ wheels = [
 
 [[package]]
 name = "warbler"
-version = "0.1.0"
+version = "0.0.11"
 source = { virtual = "." }
 dependencies = [
     { name = "databpy" },
@@ -1974,11 +1974,11 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "bpy", marker = "extra == 'bpy'", specifier = ">=5.1.1" },
-    { name = "bpy", marker = "extra == 'dev'", specifier = ">=5.1.1" },
-    { name = "databpy", specifier = ">=0.7.0" },
+    { name = "bpy", marker = "extra == 'bpy'", specifier = ">=5.2.0" },
+    { name = "bpy", marker = "extra == 'dev'", specifier = ">=5.2.0" },
+    { name = "databpy", specifier = ">=0.10.1" },
     { name = "fake-bpy-module", marker = "extra == 'dev'", specifier = ">=20260501" },
-    { name = "newton", specifier = ">=1.2.0" },
+    { name = "newton", specifier = ">=1.6.0" },
     { name = "nodebpy", specifier = ">=520.38.0" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },

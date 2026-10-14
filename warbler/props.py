@@ -30,6 +30,22 @@ class SimulationListItem(bpy.types.PropertyGroup):
         min=1,
         soft_max=50,
     )
+    solver: EnumProperty(  # type: ignore
+        name="Solver",
+        items=(
+            (
+                "XPBD",
+                "XPBD",
+                "Position-based dynamics. Supports particle-particle collisions; best for particles and curves",
+            ),
+            (
+                "VBD",
+                "VBD",
+                "Vertex block descent. Proper membrane and bending energies; best for cloth. No particle-particle collisions",
+            ),
+        ),
+        default="XPBD",
+    )
     device: EnumProperty(  # type: ignore
         items=(
             ("cpu", "CPU", "Simulate on the CPU (safe default; no shared GPU context)"),
@@ -52,30 +68,77 @@ class SimulationListItem(bpy.types.PropertyGroup):
 
     spring_ke: FloatProperty(  # type: ignore
         name="Spring Stiffness",
-        description="Stiffness constant for springs in the simulation",
-        default=1.0e5,
+        description=(
+            "Stretch stiffness of springs along curves (and along cloth edges "
+            "with XPBD)"
+        ),
+        default=1.0e3,
+        min=0.0,
     )
     spring_kd: FloatProperty(  # type: ignore
         name="Spring Damping",
-        description="Damping constant for springs in the simulation",
-        default=250.0,
+        description="Damping of curve and cloth springs",
+        default=1.0,
+        min=0.0,
     )
     spring_kf: FloatProperty(  # type: ignore
         name="Spring Friction",
         description="Friction constant for springs in the simulation",
         default=500.0,
     )
+    bend_ke: FloatProperty(  # type: ignore
+        name="Bend Stiffness",
+        description=(
+            "Stiffness of the springs that skip a point along each curve, "
+            "resisting folding. 0 disables them"
+        ),
+        default=1.0e2,
+        min=0.0,
+    )
+    cloth_tri_ke: FloatProperty(  # type: ignore
+        name="Stretch Stiffness",
+        description="Cloth membrane stretch stiffness (VBD)",
+        default=1.0e3,
+        min=0.0,
+    )
+    cloth_tri_ka: FloatProperty(  # type: ignore
+        name="Area Stiffness",
+        description="Cloth membrane area-preservation stiffness (VBD)",
+        default=1.0e3,
+        min=0.0,
+    )
+    cloth_tri_kd: FloatProperty(  # type: ignore
+        name="Stretch Damping",
+        description="Cloth membrane damping (VBD)",
+        default=1.0e-1,
+        min=0.0,
+    )
+    cloth_edge_ke: FloatProperty(  # type: ignore
+        name="Bend Stiffness",
+        description="Cloth bending stiffness across mesh edges",
+        default=1.0e1,
+        min=0.0,
+    )
+    cloth_edge_kd: FloatProperty(  # type: ignore
+        name="Bend Damping",
+        description="Cloth bending damping across mesh edges",
+        default=0.0,
+        min=0.0,
+    )
     scale: FloatProperty(  # type: ignore
         name="Simulation Scale",
         description="Scale factor for the simulation, scaling all distances and sizes",
         default=1.0,
     )
-    particle_source: PointerProperty(  # type: ignore
+    source: PointerProperty(  # type: ignore
         type=Object,
-        name="Particle Source",
-        description="Source simulation particles from this object",
+        name="Source",
+        description=(
+            "Object whose evaluated geometry is simulated: point clouds become "
+            "particles, curves become spring chains and meshes with faces become cloth"
+        ),
     )
-    particle_source_evaluate: BoolProperty(  # type: ignore
+    source_evaluate: BoolProperty(  # type: ignore
         name="Evaluate",
         description="Evaluate the object and all modifiers first before sourcing the particles",
         default=True,

@@ -1,5 +1,6 @@
 import time
 from abc import ABC
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import uuid1
 
@@ -87,24 +88,56 @@ class SimulatorBase(ABC):
         self.props.is_compiled = True
 
 
-class SimulatorXPBD(SimulatorBase):
+# Fallbacks when the source geometry has no `mass` / `radius` attribute. A mass
+# of ~0.1 kg per particle matches Newton's cloth examples; much lighter
+# particles make contact solves diverge (see CLAUDE.md).
+DEFAULT_MASS = 0.1
+DEFAULT_RADIUS = 0.05
+
+
+@dataclass
+class SourcePart:
+    """A contiguous run of simulation particles read from one geometry component.
+
+    ``component`` is the GeometrySet component the part was read from: ``points``
+    (free particles), ``curves`` (spring chains) or ``mesh`` (cloth when it has
+    faces, free particles otherwise).
+    """
+
+    component: str
+    start: int
+    count: int
+    curve_sizes: np.ndarray | None = None
+    faces: list[list[int]] = field(default_factory=list)
+    output: db.BlenderObject | None = None
+
+    @property
+    def indices(self) -> slice:
+        return slice(self.start, self.start + self.count)
+
+    @property
+    def is_cloth(self) -> bool:
+        return self.component == "mesh" and len(self.faces) > 0
+
+    @property
+    def object_type(self) -> str:
+        """Blender object type of this part's output."""
+        if self.curve_sizes is not None:
+            return "CURVES"
+        return "MESH" if self.is_cloth else "POINTCLOUD"
+
+
+class Simulator(SimulatorBase):
     """Physics simulation integrating Newton Physics with Blender.
 
     Follows Newton's architecture pattern:
     ModelBuilder → Model → State → Solver → Updated State
+
+    The evaluated geometry of ``props.source`` is split by component: points
+    become free particles, curves become spring chains and meshes with faces
+    become cloth. Each part gets its own output object that is updated every
+    frame.
     """
-
-    @property
-    def ke(self) -> float:
-        return self.props.spring_ke
-
-    @property
-    def kd(self) -> float:
-        return self.props.spring_kd
-
-    @property
-    def kf(self) -> float:
-        return self.props.spring_kf
 
     @property
     def scale(self) -> float:
@@ -116,6 +149,10 @@ class SimulatorXPBD(SimulatorBase):
             return []
         return [o for o in self.props.sim_rigid_collection.objects]
 
+    @property
+    def outputs(self) -> list[db.BlenderObject]:
+        return [p.output for p in self.parts if p.output is not None]
+
     # ============================================================================
     # Initialization
     # ============================================================================
@@ -126,39 +163,58 @@ class SimulatorXPBD(SimulatorBase):
         """Initialize simulation with specified parameters."""
         super().__init__()
         self.clock: int = 0
-        self.bob: db.BlenderObject | None = None
-        self.search_radius = 1.0
+        self.parts: list[SourcePart] = []
         self._pinned_indices: np.ndarray | None = None
-        self.particle_object: db.BlenderObject | None = None
 
     def _compile(self) -> None:
-        if self.props.is_compiled:
-            del self.model
+        self._free_model()
+        previous = {p.component: p.output for p in self.parts if p.output is not None}
         self.build()
         self.finalize()
+        self._create_outputs(previous)
+
+    def _free_model(self) -> None:
+        """Drop the Newton model, states and solver so their memory is released."""
+        for name in (
+            "builder",
+            "model",
+            "state_0",
+            "state_1",
+            "solver",
+            "control",
+            "collision_pipeline",
+            "contacts",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
+
+    def free(self) -> None:
+        """Stop the simulation and release it, keeping the output objects.
+
+        Settings that are fixed at compile time (solver, device, iterations)
+        can then be changed before compiling again.
+        """
+        self._free_model()
+        self.clock = 0
+        self.props.is_compiled = False
 
     def build(self):
-        # axis_map = {
-        #     (0, 0, 1): newton.Axis.Z,
-        #     (0, 1, 0): newton.Axis.Y,
-        #     (1, 0, 0): newton.Axis.X,
-        # }
-        # up_axis = axis_map.get(self.props.ground_plane_vector, newton.Axis.Z)
-
         self.builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        self.builder.default_particle_radius = 1.0
+        self.builder.default_particle_radius = DEFAULT_RADIUS
+        self.parts = []
+        self._pinned_indices = None
 
         self._add_rigid_bodies(self.objects)
         if self.props.use_ground_plane:
             self.builder.add_ground_plane()
 
-        if self.props.particle_source is not None:
-            geo = GeometrySet(self.props.particle_source)
-            props = geo.pointcloud.to_props()
-            if len(props.get("position", [])) > 0:
-                self._add_particles(**props)
+        if self.props.source is not None:
+            self._add_source(GeometrySet(self.props.source))
 
     def finalize(self):
+        if self.props.solver == "VBD":
+            # VBD solves particles in parallel by graph colour.
+            self.builder.color(include_bending=True)
         self.model: newton.Model = self.builder.finalize(device=self.device)
         self.model.soft_contact_ke = self.props.soft_contact_ke
         self.model.soft_contact_kd = self.props.soft_contact_kd
@@ -167,18 +223,19 @@ class SimulatorXPBD(SimulatorBase):
         self.state_0: newton.State = self.model.state()
         self.state_1: newton.State = self.model.state()
 
-        self.solver = newton.solvers.SolverXPBD(
-            model=self.model,
-            iterations=self.props.iterations,
-        )
+        if self.props.solver == "VBD":
+            self.solver = newton.solvers.SolverVBD(
+                model=self.model,
+                iterations=self.props.iterations,
+            )
+        else:
+            self.solver = newton.solvers.SolverXPBD(
+                model=self.model,
+                iterations=self.props.iterations,
+            )
         self.control = self.model.control()
         self.collision_pipeline = newton.CollisionPipeline(self.model)
         self.contacts = self.collision_pipeline.contacts()
-        if self.props.is_compiled and self.particle_object is not None:
-            bpy.data.objects.remove(self.particle_object.object)
-            self.particle_object = None
-        if self.model.particle_count > 0:
-            self.create_pointcloud()
 
     def _add_rigid_bodies(self, objects: list[bpy.types.Object]):
         """Add Blender objects as rigid bodies to the model."""
@@ -202,6 +259,58 @@ class SimulatorXPBD(SimulatorBase):
             else:
                 print(Warning(f"Unsupported shape {obj.wb.sim_shape}"))  # type: ignore
 
+    # ============================================================================
+    # Source geometry → particles, springs and cloth
+    # ============================================================================
+
+    def _world_props(self, props: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """Move position / velocity from source object space into world space."""
+        source = self.props.source
+        if source is None:
+            return props
+        mat = np.array(source.matrix_world, dtype=np.float64)
+        out = dict(props)
+        if "position" in out:
+            out["position"] = out["position"] @ mat[:3, :3].T + mat[:3, 3]
+        if "velocity" in out:
+            out["velocity"] = out["velocity"] @ mat[:3, :3].T
+        return out
+
+    def _add_source(self, geo: GeometrySet) -> None:
+        """Add every component of the evaluated source geometry to the builder."""
+        pinned: list[np.ndarray] = []
+
+        def add(component: str, attrs, **kwargs) -> None:
+            props = self._world_props(attrs.to_props())
+            if len(props.get("position", [])) == 0:
+                return
+            part = SourcePart(
+                component=component,
+                start=self.builder.particle_count,
+                count=len(props["position"]),
+                **kwargs,
+            )
+            if part.is_cloth:
+                self._add_cloth(part, triangles=attrs.triangles, **props)
+            else:
+                self._add_particles(**props)
+                if part.curve_sizes is not None:
+                    self._add_curve_springs(part)
+            if "pinned" in props:
+                pinned.append(part.start + np.flatnonzero(props["pinned"]))
+            self.parts.append(part)
+
+        add("points", geo.points)
+        add("curves", geo.curves, curve_sizes=geo.curves.curve_sizes)
+        add("mesh", geo.mesh, faces=geo.mesh.faces)
+
+        if pinned:
+            self._pinned_indices = np.concatenate(pinned)
+            for i in self._pinned_indices:
+                # Zero mass AND non-ACTIVE so spring solves don't divide by zero
+                self.builder.particle_mass[i] = 0.0
+                self.builder.particle_flags[i] = 0
+
     def _add_particles(
         self,
         position: np.ndarray,
@@ -210,37 +319,84 @@ class SimulatorXPBD(SimulatorBase):
         radius: np.ndarray | None = None,
         pinned: np.ndarray | None = None,
     ) -> None:
-        if len(position) == 0:
-            return
         n = position.shape[0]
         if velocity is None:
             velocity = np.zeros(position.shape, dtype=float)
         if mass is None:
-            mass = np.repeat(1.0, n)
+            mass = np.repeat(DEFAULT_MASS, n)
         if radius is None:
-            radius = np.repeat(0.1, n)
-
-        # Build per-particle flags: pinned → 0 (kinematic), otherwise ACTIVE.
-        active_flag = int(newton.ParticleFlags.ACTIVE)
-        if pinned is not None and pinned.any():
-            flags = np.where(pinned, 0, active_flag).tolist()
-            self._pinned_indices = np.where(pinned)[0]
-        else:
-            flags = [active_flag] * n
-            self._pinned_indices = None
-
-        self.search_radius = float(np.max(radius)) * 2
+            radius = np.repeat(DEFAULT_RADIUS, n)
 
         self.builder.add_particles(
             pos=position,  # type: ignore
             vel=velocity,  # type: ignore
             mass=mass,  # type: ignore
             radius=radius,  # type: ignore
-            flags=flags,
+            flags=[int(newton.ParticleFlags.ACTIVE)] * n,
         )
 
-    def _add_springs(self):
-        """Add spring constraints between consecutive particles."""
+    def _add_curve_springs(self, part: SourcePart) -> None:
+        """Connect the points of each curve with stretch and bend springs.
+
+        Stretch springs join neighbouring points; bend springs skip one point
+        (i → i+2) and resist folding.
+        """
+        assert part.curve_sizes is not None
+        ke, kd, bend_ke = self.props.spring_ke, self.props.spring_kd, self.props.bend_ke
+        offsets = part.start + np.concatenate([[0], np.cumsum(part.curve_sizes)])
+        for first, end in zip(offsets[:-1].tolist(), offsets[1:].tolist(), strict=True):
+            for i in range(first, end - 1):
+                self.builder.add_spring(i, i + 1, ke, kd, 0.0)
+            if bend_ke > 0.0:
+                for i in range(first, end - 2):
+                    self.builder.add_spring(i, i + 2, bend_ke, kd, 0.0)
+
+    def _add_cloth(
+        self,
+        part: SourcePart,
+        triangles: np.ndarray,
+        position: np.ndarray,
+        velocity: np.ndarray | None = None,
+        mass: np.ndarray | None = None,
+        radius: np.ndarray | None = None,
+        pinned: np.ndarray | None = None,
+    ) -> None:
+        """Add a triangulated mesh as cloth.
+
+        VBD uses the triangle (membrane) and edge (bending) energies directly.
+        XPBD has no triangle constraint, so stretch comes from springs along
+        the mesh edges instead.
+        """
+        props = self.props
+        self.builder.add_cloth_mesh(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),  # ty: ignore[invalid-argument-type]
+            scale=1.0,
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            vertices=[wp.vec3(*p) for p in position],
+            indices=triangles.flatten().tolist(),
+            density=1.0,  # overwritten by per-vertex mass below
+            tri_ke=props.cloth_tri_ke,
+            tri_ka=props.cloth_tri_ka,
+            tri_kd=props.cloth_tri_kd,
+            edge_ke=props.cloth_edge_ke,
+            edge_kd=props.cloth_edge_kd,
+            add_springs=props.solver == "XPBD",
+            spring_ke=props.spring_ke,
+            spring_kd=props.spring_kd,
+            particle_radius=DEFAULT_RADIUS,
+        )
+        # add_cloth_mesh derives mass from density × triangle area, which is
+        # tiny on fine meshes and makes contacts diverge. Use an explicit
+        # per-vertex mass instead, like Newton's cloth examples.
+        for local, i in enumerate(range(part.start, part.start + part.count)):
+            self.builder.particle_mass[i] = (
+                float(mass[local]) if mass is not None else DEFAULT_MASS
+            )
+            if radius is not None:
+                self.builder.particle_radius[i] = float(radius[local])
+            if velocity is not None:
+                self.builder.particle_qd[i] = wp.vec3(*velocity[local])
 
     # ============================================================================
     # Blender ↔ Simulation Synchronization
@@ -286,8 +442,6 @@ class SimulatorXPBD(SimulatorBase):
         if body_velocities is not None and self.state_0.body_qd is not None:
             self.state_0.body_qd.assign(body_velocities)
 
-        self._update_pinned_particles()
-
     def _update_pinned_particles(self) -> None:
         """Re-read pinned particle positions from the GN source each frame.
 
@@ -298,22 +452,21 @@ class SimulatorXPBD(SimulatorBase):
         if (
             self._pinned_indices is None
             or len(self._pinned_indices) == 0
-            or self.props.particle_source is None
+            or self.props.source is None
             or self.state_0.particle_q is None
         ):
             return
 
-        geo = GeometrySet(self.props.particle_source)
-        props = geo.pointcloud.to_props()
-        if "position" not in props:
-            return
-
-        new_positions = props["position"]
-        if len(new_positions) != self.model.particle_count:
-            return
-
+        geo = GeometrySet(self.props.source)
         all_q = self.state_0.particle_q.numpy()
-        all_q[self._pinned_indices] = new_positions[self._pinned_indices]
+        for part in self.parts:
+            attrs = getattr(geo, part.component)
+            props = self._world_props(attrs.to_props())
+            if "pinned" not in props or len(props["pinned"]) != part.count:
+                # Topology changed since compile; pins can't be matched up
+                continue
+            local = np.flatnonzero(props["pinned"])
+            all_q[part.start + local] = props["position"][local]
         self.state_0.particle_q.assign(all_q)
 
     def _get_kinematic_body_transform(
@@ -402,23 +555,99 @@ class SimulatorXPBD(SimulatorBase):
     # Visualization
     # ============================================================================
 
-    def create_pointcloud(self):
-        """Create Blender pointcloud for the simulation particles."""
-        self.particle_object = db.BlenderObject.from_pointcloud(
-            self.particle_positions,
-            name="ParticleObject",
-        )
-        self.particle_object.store_named_attribute(
-            np.array(self.builder.particle_radius),
-            "radius",
-        )
+    def _output_collection(self) -> bpy.types.Collection | None:
+        source = self.props.source
+        if source is not None and source.users_collection:
+            return source.users_collection[0]
+        return None
 
-    def _update_particle_visualization(self):
-        """Update particle pointcloud with current simulation state."""
-        if self.particle_object is None:
+    def _create_outputs(
+        self, previous: dict[str, db.BlenderObject] | None = None
+    ) -> None:
+        """Create or reuse a Blender object for each source part's sim results.
+
+        An existing output (from the previous compile, or found by name) keeps
+        its object and data block and only has its geometry rebuilt, so
+        modifiers and materials on it survive a re-compile. Outputs live at the
+        world origin since simulation positions are in world space.
+        """
+        previous = dict(previous or {})
+        source = self.props.source
+        if self.parts:
+            assert source is not None
+            positions = self.particle_positions
+            assert self.model.particle_radius is not None
+            radius = self.model.particle_radius.numpy()
+            pinned = np.zeros(self.model.particle_count, dtype=bool)
+            if self._pinned_indices is not None:
+                pinned[self._pinned_indices] = True
+
+        for part in self.parts:
+            assert source is not None
+            name = f"{source.name}_{part.component}"
+            pos = positions[part.indices]
+            obj = previous.pop(part.component, None)
+            obj = obj.object if obj is not None else bpy.data.objects.get(name)
+            if obj is not None and obj.type == part.object_type:
+                part.output = self._rebuild_output(obj, part, pos)
+            else:
+                part.output = self._new_output(name, part, pos)
+            part.output.store_named_attribute(radius[part.indices], "radius")
+            if self._pinned_indices is not None:
+                part.output.store_named_attribute(pinned[part.indices], "pinned")
+
+        # Parts that no longer exist in the source geometry
+        for bob in previous.values():
+            try:
+                bpy.data.objects.remove(bob.object)
+            except ReferenceError:
+                pass  # already deleted by the user
+
+    def _new_output(
+        self, name: str, part: SourcePart, pos: np.ndarray
+    ) -> db.BlenderObject:
+        collection = self._output_collection()
+        if part.curve_sizes is not None:
+            return db.BlenderObject.from_curves(
+                pos, part.curve_sizes, name=name, collection=collection
+            )
+        if part.is_cloth:
+            return db.BlenderObject.from_mesh(
+                pos, faces=part.faces, name=name, collection=collection
+            )
+        return db.BlenderObject.from_pointcloud(pos, name=name, collection=collection)
+
+    @staticmethod
+    def _rebuild_output(
+        obj: bpy.types.Object, part: SourcePart, pos: np.ndarray
+    ) -> db.BlenderObject:
+        """Clear ``obj``'s geometry in place and refill it for ``part``."""
+        bob = db.BlenderObject(obj)
+        data = obj.data
+        if isinstance(data, bpy.types.Mesh):
+            bob.new_from_pydata(pos, faces=part.faces)
+            return bob
+        if isinstance(data, bpy.types.Curves):
+            assert part.curve_sizes is not None
+            data.remove_curves()
+            data.add_curves(part.curve_sizes.tolist())
+        elif isinstance(data, bpy.types.PointCloud):
+            data.resize(0)
+            data.resize(len(pos))
+        bob.position = pos  # type: ignore[assignment]
+        return bob
+
+    def _update_outputs(self) -> None:
+        """Write current particle positions and velocities to the output objects."""
+        if self.model.particle_count == 0:
             return
-        self.particle_object.position = self.particle_positions  # type: ignore[assignment]
-        self.particle_object.store_named_attribute(self.velocity, "velocity")
+        positions = self.particle_positions
+        velocity = self.velocity
+        for part in self.parts:
+            if part.output is None:
+                continue
+            part.output.position = positions[part.indices]  # type: ignore[assignment]
+            part.output.store_named_attribute(velocity[part.indices], "velocity")
 
     # ============================================================================
     # Main Simulation Loop
@@ -448,13 +677,13 @@ class SimulatorXPBD(SimulatorBase):
             return
         try:
             self._update_simulation_from_blender()
+            self._update_pinned_particles()
             start_simulate = time.time()
             self.simulate()
             self.props.time_compute = time.time() - start_simulate
             start_sync = time.time()
             self._update_blender_from_simulation()
-            if self.model.particle_count > 0:
-                self._update_particle_visualization()
+            self._update_outputs()
             self.props.time_sync = time.time() - start_sync
             self.clock += 1
         except Exception as e:  # noqa: BLE001

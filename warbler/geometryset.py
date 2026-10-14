@@ -6,14 +6,22 @@ from bpy.types import Context, Depsgraph, Object
 # Geometry data types that carry named attributes
 _GEOM_TYPES = (bpy.types.Mesh, bpy.types.PointCloud, bpy.types.Curves)
 
+# POINT-domain attributes warbler reads from every geometry component
+PARTICLE_ATTRIBUTES = ("position", "velocity", "mass", "radius", "pinned")
+
 
 class GeometryAttributes:
     """Wraps the evaluated data of any geometry object (Mesh, PointCloud, Curves)."""
 
     def __init__(
-        self, data: bpy.types.Mesh | bpy.types.PointCloud | bpy.types.Curves | None
+        self,
+        data: bpy.types.Mesh | bpy.types.PointCloud | bpy.types.Curves | None,
+        owner: "GeometrySet | None" = None,
     ):
         self._data = data
+        # Evaluated data is freed with the GeometrySet that produced it, so
+        # keep it alive for as long as these attributes are.
+        self._owner = owner
 
     @property
     def attributes(self):
@@ -22,15 +30,46 @@ class GeometryAttributes:
         return self._data.attributes
 
     def to_props(self) -> dict[str, np.ndarray]:
-        """Return the subset of attributes warbler knows how to use as particle inputs."""
+        """Return the subset of POINT attributes warbler uses as particle inputs."""
         if self._data is None:
             return {}
         attrs = self._data.attributes
         return {
             name: db.Attribute(attrs[name]).as_array()
-            for name in ["position", "velocity", "mass", "radius", "pinned"]
-            if name in attrs
+            for name in PARTICLE_ATTRIBUTES
+            if name in attrs and attrs[name].domain == "POINT"
         }
+
+    def __len__(self) -> int:
+        if self._data is None or "position" not in self._data.attributes:
+            return 0
+        return len(self._data.attributes["position"].data)  # ty: ignore[unresolved-attribute]
+
+    @property
+    def curve_sizes(self) -> np.ndarray:
+        """Number of points in each curve (Curves data only)."""
+        if not isinstance(self._data, bpy.types.Curves):
+            return np.zeros(0, dtype=np.int32)
+        offsets = np.zeros(len(self._data.curve_offset_data), dtype=np.int32)
+        self._data.curve_offset_data.foreach_get("value", offsets)
+        return np.diff(offsets)
+
+    @property
+    def triangles(self) -> np.ndarray:
+        """(N, 3) vertex indices of the mesh's triangulated faces (Mesh data only)."""
+        if not isinstance(self._data, bpy.types.Mesh) or len(self._data.polygons) == 0:
+            return np.zeros((0, 3), dtype=np.int32)
+        self._data.calc_loop_triangles()
+        tris = np.zeros(len(self._data.loop_triangles) * 3, dtype=np.int32)
+        self._data.loop_triangles.foreach_get("vertices", tris)
+        return tris.reshape(-1, 3)
+
+    @property
+    def faces(self) -> list[list[int]]:
+        """Polygon vertex indices of the mesh, for rebuilding it as an output."""
+        if not isinstance(self._data, bpy.types.Mesh):
+            return []
+        return [list(p.vertices) for p in self._data.polygons]
 
 
 def _as_geom_data(
@@ -84,7 +123,36 @@ class GeometrySet:
     @property
     def pointcloud(self) -> GeometryAttributes:
         """Return attributes from whatever geometry type the source uses."""
-        return GeometryAttributes(self.data)
+        return GeometryAttributes(self.data, self)
+
+    def _component(self, name: str, kind: type) -> GeometryAttributes:
+        """Attributes of one component of the evaluated geometry, if present.
+
+        Without a GN-evaluated geometry set, the object's own data is used when
+        it matches ``kind``.
+        """
+        if self._eval_geom is not None:
+            data = getattr(self._eval_geom, name, None)
+        else:
+            data = self.eval_obj.data
+        return GeometryAttributes(
+            _as_geom_data(data) if isinstance(data, kind) else None, self
+        )
+
+    @property
+    def points(self) -> GeometryAttributes:
+        """The point cloud component — simulated as free particles."""
+        return self._component("pointcloud", bpy.types.PointCloud)
+
+    @property
+    def curves(self) -> GeometryAttributes:
+        """The curves component — simulated as spring chains (ropes / hair)."""
+        return self._component("curves", bpy.types.Curves)
+
+    @property
+    def mesh(self) -> GeometryAttributes:
+        """The mesh component — faces are simulated as cloth."""
+        return self._component("mesh", bpy.types.Mesh)
 
     def _get_point_count(self) -> int:
         data = self.data

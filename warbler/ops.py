@@ -1,9 +1,11 @@
 from typing import ClassVar
 
+from bpy.props import EnumProperty
 from bpy.types import Context, Operator
 
+from . import demos
 from .manager import get_manager
-from .simulation import SimulatorXPBD
+from .simulation import Simulator
 
 
 class ReturnValues:
@@ -44,7 +46,7 @@ class WB_OT_AddSimulation(BaseOperator):
 
     def execute(self, context):
         man = self.manager(context)
-        man.add(SimulatorXPBD())
+        man.add(Simulator())
         return ReturnValues.FINISHED
 
 
@@ -65,6 +67,27 @@ class WB_OT_CompileSimulation(BaseOperator):
         return ReturnValues.FINISHED
 
 
+class WB_OT_FreeSimulation(BaseOperator):
+    bl_idname = "wb.free_simulation"
+    bl_label = "Free"
+    bl_description = (
+        "Stop the simulation and release it from the device, keeping its output "
+        "objects. Solver, device and iterations can then be changed before "
+        "compiling again"
+    )
+
+    def execute(self, context):
+        man = self.manager(context)
+        item = man.active_item
+        sim = man.simulations.get(item.name)
+        if sim is not None:
+            sim.free()
+        else:
+            # e.g. after reloading a file: the compiled state didn't survive
+            item.is_compiled = False
+        return ReturnValues.FINISHED
+
+
 class WB_OT_RemoveSimulation(BaseOperator):
     bl_idname = "wb.remove_simulation"
     bl_label = "Remove Simulation"
@@ -81,4 +104,34 @@ class WB_OT_RemoveSimulation(BaseOperator):
         return ReturnValues.FINISHED
 
 
-CLASSES = [WB_OT_AddSimulation, WB_OT_RemoveSimulation, WB_OT_CompileSimulation]
+class WB_OT_AddDemo(BaseOperator):
+    bl_idname = "wb.add_demo"
+    bl_label = "Add Demo"
+    bl_description = (
+        "Add a demo simulation whose source geometry is built with Geometry Nodes"
+    )
+    bl_options = {"REGISTER", "UNDO"}  # noqa: RUF012
+
+    demo: EnumProperty(  # type: ignore
+        name="Demo",
+        items=[(key, name, desc) for key, (name, desc, _) in demos.DEMOS.items()],
+    )
+
+    def execute(self, context: Context):
+        _, _, build = demos.DEMOS[self.demo]
+        sim = build(context)
+        try:
+            sim.compile()
+        except Exception as e:  # noqa: BLE001 — report any compile failure in the UI
+            self.report(ReportValues.ERROR, f"Unable to compile demo, error: {e}")  # type: ignore
+            return ReturnValues.CANCELLED
+        return ReturnValues.FINISHED
+
+
+CLASSES = [
+    WB_OT_AddSimulation,
+    WB_OT_RemoveSimulation,
+    WB_OT_CompileSimulation,
+    WB_OT_FreeSimulation,
+    WB_OT_AddDemo,
+]

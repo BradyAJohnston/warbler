@@ -3,7 +3,7 @@ import pytest
 
 from warbler.manager import get_manager
 from warbler.props import object_properties
-from warbler.simulation import SimulatorXPBD
+from warbler.simulation import Simulator
 from warbler.utils import get_scene
 
 
@@ -16,7 +16,7 @@ def _make_rigid_collection(name: str = "Rigid") -> bpy.types.Collection:
 def test_empty_simulation_compiles():
     """A simulation with no objects and no particle source should compile cleanly."""
     man = get_manager(bpy.context)
-    man.add(SimulatorXPBD())
+    man.add(Simulator())
     item = man.active_item
     item.device = "cpu"
     item.use_ground_plane = False
@@ -34,7 +34,7 @@ def test_rigid_body_compiles():
     coll.objects.link(cube)
 
     man = get_manager(bpy.context)
-    man.add(SimulatorXPBD())
+    man.add(Simulator())
     item = man.active_item
     item.sim_rigid_collection = coll
     item.device = "cpu"

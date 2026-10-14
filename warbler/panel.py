@@ -3,7 +3,13 @@ from bpy.types import Panel, UILayout
 
 from .geometryset import GeometrySet
 from .manager import get_manager
-from .ops import WB_OT_AddSimulation, WB_OT_CompileSimulation, WB_OT_RemoveSimulation
+from .ops import (
+    WB_OT_AddDemo,
+    WB_OT_AddSimulation,
+    WB_OT_CompileSimulation,
+    WB_OT_FreeSimulation,
+    WB_OT_RemoveSimulation,
+)
 from .props import WarblerObjectProperties, WarblerSceneProperties
 
 # Attributes warbler knows how to map into a simulation
@@ -41,7 +47,7 @@ def draw_geometry_info(
     """Draw a read-only summary of an object's GN-evaluated geometry.
 
     Uses GeometrySet so the displayed data matches exactly what warbler reads
-    at compile time (GN pointcloud output takes priority over base mesh).
+    at compile time, one row per geometry component.
     """
     if known_attrs is None:
         known_attrs = _KNOWN_PARTICLE_ATTRS
@@ -52,44 +58,32 @@ def draw_geometry_info(
         layout.label(text="Could not evaluate geometry", icon="ERROR")
         return
 
-    data = geo.data
-    if data is None:
-        layout.label(text="No geometry data", icon="ERROR")
-        return
-
     box = layout.box()
     col = box.column(align=True)
-
-    if isinstance(data, bpy.types.PointCloud):
-        pt_count = geo._get_point_count()
-        col.label(text=f"Points: {pt_count:,}", icon="POINTCLOUD_DATA")
-    elif isinstance(data, bpy.types.Mesh):
-        pt_count = geo._get_point_count()
-        col.label(text=f"Vertices: {pt_count:,}", icon="MESH_DATA")
-        col.label(text=f"Faces: {len(data.polygons):,}")
-    elif isinstance(data, bpy.types.Curves):
-        col.label(
-            text=f"Curves: {len(data.curves):,}  Points: {geo._get_point_count():,}",
-            icon="CURVES_DATA",
-        )
-    else:
-        col.label(text=f"Unsupported type: {geo.obj_type}", icon="QUESTION")
-        return
-
-    attrs = data.attributes
-    if not attrs:
-        return
-
-    col.separator()
-    col.label(text="Attributes:")
-    for attr in attrs:
-        if attr.name.startswith("."):
+    found = False
+    for label, icon, attrs in (
+        ("Points", "POINTCLOUD_DATA", geo.points),
+        ("Curves", "CURVES_DATA", geo.curves),
+        ("Mesh", "MESH_DATA", geo.mesh),
+    ):
+        data = attrs._data
+        if data is None or len(attrs) == 0:
             continue
-        domain = DOMAIN_SHORT.get(attr.domain, attr.domain)
-        dtype = TYPE_SHORT.get(attr.data_type, attr.data_type)
-        known = attr.name in known_attrs
-        icon = "CHECKMARK" if known else "DOT"
-        col.label(text=f"  {attr.name}  ({dtype}, {domain})", icon=icon)
+        found = True
+        text = f"{label}: {len(attrs):,} points"
+        if isinstance(data, bpy.types.Curves):
+            text += f", {len(data.curves):,} curves"
+        elif isinstance(data, bpy.types.Mesh):
+            text += f", {len(data.polygons):,} faces"
+        col.label(text=text, icon=icon)
+        for attr in data.attributes:
+            if attr.name.startswith(".") or attr.name not in known_attrs:
+                continue
+            domain = DOMAIN_SHORT.get(attr.domain, attr.domain)
+            dtype = TYPE_SHORT.get(attr.data_type, attr.data_type)
+            col.label(text=f"  {attr.name}  ({dtype}, {domain})", icon="CHECKMARK")
+    if not found:
+        col.label(text="No geometry data", icon="ERROR")
 
 
 def create_panel(
@@ -155,6 +149,7 @@ class WB_PT_WarblerPanel(Panel):
         col = row.column()
         col.operator(WB_OT_AddSimulation.bl_idname, text="", icon="ADD")
         col.operator(WB_OT_RemoveSimulation.bl_idname, text="", icon="REMOVE")
+        layout.operator_menu_enum(WB_OT_AddDemo.bl_idname, "demo", icon="NODETREE")
 
         try:
             item = man.active_item
@@ -182,37 +177,57 @@ class WB_PT_WarblerPanel(Panel):
 
         col.prop(item, "scale")
 
-        header, panel = create_panel(layout, idname="particles")
-        header.label(text="Particles")
+        col.prop(item, "solver")
+        col.prop(item, "device")
+        col.prop(item, "substeps")
+        col.prop(item, "iterations")
+
+        header, panel = create_panel(layout, idname="source")
+        header.label(text="Source")
         if panel:
             col = panel.column()
-            col.prop(item, "particle_source", text="Source")
-            if item.particle_source is not None:
+            col.prop(item, "source", text="Object")
+            if item.source is not None:
                 draw_geometry_info(
                     col,
-                    item.particle_source,
+                    item.source,
                     context,
                     known_attrs=_KNOWN_PARTICLE_ATTRS,
                 )
 
             header, panel = create_panel(panel, "spring", default_closed=True)
             if header:
-                header.label(text="Springs")
+                header.label(text="Curves")
             if panel:
                 col = panel.column()
                 col.prop(item, "spring_ke")
                 col.prop(item, "spring_kd")
-                col.prop(item, "spring_kf")
+                col.prop(item, "bend_ke")
+
+        header, panel = create_panel(layout, "cloth", default_closed=True)
+        header.label(text="Cloth")
+        if panel:
+            col = panel.column()
+            col.prop(item, "cloth_tri_ke")
+            col.prop(item, "cloth_tri_ka")
+            col.prop(item, "cloth_tri_kd")
+            col.prop(item, "cloth_edge_ke")
+            col.prop(item, "cloth_edge_kd")
+
+        header, panel = create_panel(layout, "contacts", default_closed=True)
+        header.label(text="Contacts")
+        if panel:
+            col = panel.column()
+            col.prop(item, "use_ground_plane")
+            col.prop(item, "soft_contact_ke")
+            col.prop(item, "soft_contact_kd")
+            col.prop(item, "soft_contact_mu")
 
         header, panel = create_panel(layout, idname="rigid_bodies")
         header.label(text="Rigid Bodies")
         if panel:
             col = panel.column()
             col.prop(item, "sim_rigid_collection")
-            col.prop(item, "rigid_decay_frames")
-            col.prop(item, "substeps")
-            col.prop(item, "iterations")
-            col.prop(item, "is_active")
 
         row = layout.row()
         row.scale_y = 2
@@ -220,6 +235,8 @@ class WB_PT_WarblerPanel(Panel):
             WB_OT_CompileSimulation.bl_idname,
             text="Compile" if not item.is_compiled else "Re-Compile",
         )
+        if item.is_compiled:
+            row.operator(WB_OT_FreeSimulation.bl_idname, icon="CANCEL")
 
 
 CLASSES = [WB_PT_WarblerPanel, WB_UL_RigidBodyCollection]

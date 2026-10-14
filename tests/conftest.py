@@ -8,7 +8,7 @@ import warbler
 from warbler import manager as mgr
 from warbler.manager import get_manager
 from warbler.props import object_properties
-from warbler.simulation import SimulatorXPBD
+from warbler.simulation import Simulator
 from warbler.utils import get_scene
 
 CURRENT = Path(__file__).parent
@@ -49,7 +49,7 @@ def rigid_simulation():
     coll.objects.link(cube)
 
     man = get_manager(bpy.context)
-    man.add(SimulatorXPBD())
+    man.add(Simulator())
     item = man.active_item
     item.sim_rigid_collection = coll
     item.device = "cpu"

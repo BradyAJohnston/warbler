@@ -3,13 +3,13 @@ from bpy.app.handlers import persistent
 from bpy.types import Context, Scene
 
 from . import props
-from .simulation import SimulatorBase, SimulatorXPBD
+from .simulation import Simulator, SimulatorBase
 from .utils import get_scene
 
 
 class SimulationManager:
     def __init__(self):
-        self.simulations: dict[str, SimulatorXPBD] = {}
+        self.simulations: dict[str, Simulator] = {}
 
     @property
     def scene(self) -> Scene:
@@ -43,7 +43,7 @@ class SimulationManager:
         item = self.sim_items[value]
         return self.simulations[item.name]
 
-    def add(self, simulation: SimulatorXPBD) -> None:
+    def add(self, simulation: Simulator) -> None:
         self.simulations[simulation.uuid] = simulation
         item = self.sim_items.add()
         item.name = simulation.uuid
@@ -55,7 +55,7 @@ class SimulationManager:
                 del self.simulations[id]
 
         for id, sim in self.simulations.items():
-            if sim.is_active:
+            if sim.is_active and sim.props.is_compiled:
                 sim.step()
 
     def remove(self, index: int) -> None:
