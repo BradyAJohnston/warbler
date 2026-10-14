@@ -2,22 +2,26 @@
 
 An add-on to bring interactive GPU simuilations via NVIDIA's [warp](https://github.com/NVIDIA/warp) to Blender's viewport.
 
-> [!CAUTION]
-> Extremely early on in development.
-> `warbler` is currently only compatible with NVIDIA GPUs. If you machine doesn't have one it will NOT work.
-
 ## Usage
 
-Currently only adds the operator `Start Simulation` (accessible through the `F3` menu) to create a cube of particles that then simulate and interact with the default cube being moved around the scene as below.
+Build components for a simulation through Geometry Nodes, then compile a simulation to run on the GPU through NVIDIA's [`newton`](https://github.com/newton-physics/newton) and [`warp`](https://github.com/NVIDIA/warp) frameworks.
 
 ![](docs/img/interactive_curves.mp4)
 
 ## Installation
 
-Clone the add-on, then run the build script through Blender or a compatible python that is `3.13`. This will create a `warbler_X.X.X.zip` that can be installed through Blender's regular add-on installation.
+Use the `uv` package manager, ensure it is installed on your system.
+
+Inside the cloner repo, run these commands:
+
+Download required packages and setup the `blender_manifest.toml` with this command:
 
 ```bash
-git clone git@github.com:BradyAJohnston/warbler.git
-cd warbler
-blender -b -P build.py
+uvx extbpy sync
+```
+
+Build the standalone `.zip` that is required for regular installation:
+
+```bash
+uvx extbpy build
 ```
