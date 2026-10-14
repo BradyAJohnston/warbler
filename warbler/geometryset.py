@@ -27,7 +27,7 @@ class GeometryAttributes:
             return {}
         attrs = self._data.attributes
         return {
-            name: db.Attribute(attrs[name]).as_array()  # ty: ignore[invalid-argument-type]
+            name: db.Attribute(attrs[name]).as_array()
             for name in ["position", "velocity", "mass", "radius", "pinned"]
             if name in attrs
         }
