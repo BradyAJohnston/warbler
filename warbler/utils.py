@@ -19,18 +19,32 @@ def blender_rotation(quat: Quaternion) -> np.ndarray:
     return np.array([getattr(quat, j) for j in "xyzw"])
 
 
-def wp_rotation(obj: bpy.types.Object) -> wp.quat:
-    return wp.quat(*blender_rotation(obj.rotation_quaternion))
+def world_transform(obj: bpy.types.Object) -> tuple[np.ndarray, np.ndarray]:
+    """World-space location and rotation (xyzw quaternion) of ``obj``.
 
-
-def wp_location(obj: bpy.types.Object) -> wp.vec3:
-    return wp.vec3(*obj.location)
+    Taken from ``matrix_world``, so parents, constraints and any rotation mode
+    are accounted for. Scale is left out; it is applied to shape sizes instead.
+    """
+    loc, rot, _ = obj.matrix_world.decompose()
+    return np.array(loc), blender_rotation(rot.normalized())
 
 
 def wp_transform(obj: bpy.types.Object | None = None) -> wp.transform:
     if obj is None:
         return wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat(0.0, 0.0, 0.0, 1.0))
-    return wp.transform(wp_location(obj), wp_rotation(obj))
+    loc, rot = world_transform(obj)
+    return wp.transform(wp.vec3(*loc), wp.quat(*rot))
+
+
+def angular_velocity(q0: np.ndarray, q1: np.ndarray, dt: float) -> np.ndarray:
+    """World-frame angular velocity rotating xyzw quaternion ``q0`` to ``q1`` in ``dt``."""
+    a = Quaternion((q0[3], q0[0], q0[1], q0[2]))
+    b = Quaternion((q1[3], q1[0], q1[1], q1[2]))
+    delta = b @ a.inverted()
+    if delta.w < 0.0:  # take the short way round
+        delta.negate()
+    axis, angle = delta.to_axis_angle()
+    return np.array(axis) * angle / dt
 
 
 def decay_lerp(a, b, decay: int, dt: float) -> np.ndarray:

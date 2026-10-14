@@ -15,8 +15,9 @@ from . import rigid
 from .geometryset import GeometrySet
 from .props import SimulationListItem
 from .utils import (
-    blender_rotation,
+    angular_velocity,
     get_scene,
+    world_transform,
     wp_transform,
 )
 
@@ -165,6 +166,10 @@ class Simulator(SimulatorBase):
         self.clock: int = 0
         self.parts: list[SourcePart] = []
         self._pinned_indices: np.ndarray | None = None
+        # (object, shape index) of each rigid box, for live scale updates
+        self._rigid_shapes: list[tuple[Object, int]] = []
+        # (start, target) shape_scale to ramp between over this frame's substeps
+        self._scale_ramp: tuple[np.ndarray, np.ndarray] | None = None
 
     def _compile(self) -> None:
         self._free_model()
@@ -199,10 +204,15 @@ class Simulator(SimulatorBase):
         self.props.is_compiled = False
 
     def build(self):
+        # Rigid bodies read matrix_world, which is stale after a script edits
+        # location / rotation / scale until the view layer is re-evaluated.
+        if bpy.context.view_layer is not None:
+            bpy.context.view_layer.update()
         self.builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         self.builder.default_particle_radius = DEFAULT_RADIUS
         self.parts = []
         self._pinned_indices = None
+        self._rigid_shapes = []
 
         self._add_rigid_bodies(self.objects)
         if self.props.use_ground_plane:
@@ -248,14 +258,17 @@ class Simulator(SimulatorBase):
             )
 
             if obj.wb.sim_shape == "CUBE":  # type: ignore
-                obj.wb.sim_body_index = self.builder.add_shape_box(  # type: ignore
+                hx, hy, hz = rig.half_extents()
+                shape = self.builder.add_shape_box(
                     body=body,
                     xform=wp_transform(),
-                    hx=obj.dimensions[0] / 2.0,
-                    hy=obj.dimensions[1] / 2.0,
-                    hz=obj.dimensions[2] / 2.0,
+                    hx=hx,
+                    hy=hy,
+                    hz=hz,
                     cfg=rig.shape_config(),
                 )
+                obj.wb.sim_body_index = shape  # type: ignore
+                self._rigid_shapes.append((obj, shape))
             else:
                 print(Warning(f"Unsupported shape {obj.wb.sim_shape}"))  # type: ignore
 
@@ -442,6 +455,41 @@ class Simulator(SimulatorBase):
         if body_velocities is not None and self.state_0.body_qd is not None:
             self.state_0.body_qd.assign(body_velocities)
 
+    def _update_rigid_scales(self) -> None:
+        """Queue a resize of rigid boxes to their objects' world-space size.
+
+        The collision pipeline reads ``shape_scale`` (box half-extents) and
+        ``shape_collision_radius`` (broadphase bounding sphere) from the model
+        on every collide, so resizing takes effect without a re-compile. The
+        change is ramped across the frame's substeps in ``simulate()``: applied
+        in one substep, a growing box would bury particles and the contact
+        solve would launch them. Mass and inertia are not updated, so for
+        active bodies this only changes their collision size.
+        """
+        self._scale_ramp = None
+        if not self._rigid_shapes or self.model.shape_scale is None:
+            return
+        start = self.model.shape_scale.numpy()
+        target = start.copy()
+        for obj, shape in self._rigid_shapes:
+            target[shape] = rigid.RigidObject(obj).half_extents()
+        if not np.allclose(start, target, rtol=1e-6, atol=1e-9):
+            self._scale_ramp = (start, target)
+
+    def _apply_rigid_scales(self, t: float) -> None:
+        """Set rigid box sizes to fraction ``t`` of the way through the ramp."""
+        if self._scale_ramp is None:
+            return
+        start, target = self._scale_ramp
+        scale = start + (target - start) * t
+        assert self.model.shape_scale is not None
+        self.model.shape_scale.assign(scale)
+        if self.model.shape_collision_radius is not None:
+            radius = self.model.shape_collision_radius.numpy()
+            shapes = [shape for _, shape in self._rigid_shapes]
+            radius[shapes] = np.linalg.norm(scale[shapes], axis=1)
+            self.model.shape_collision_radius.assign(radius)
+
     def _update_pinned_particles(self) -> None:
         """Re-read pinned particle positions from the GN source each frame.
 
@@ -482,12 +530,14 @@ class Simulator(SimulatorBase):
         forces to it. We still write velocity into body_qd so Newton can
         generate correct collision impulses on particles the body sweeps through.
         """
-        rot = blender_rotation(obj.rotation_quaternion)
-        loc = np.array(obj.location)
+        loc, rot = world_transform(obj)
 
         if self.clock != 0 and body_velocities is not None:
-            velocity = (loc - current_sim_transform[0:3]) / self.frame_dt
-            body_velocities[body_index, 0:3] = velocity
+            prev_loc, prev_rot = current_sim_transform[0:3], current_sim_transform[3:7]
+            body_velocities[body_index, 0:3] = (loc - prev_loc) / self.frame_dt
+            body_velocities[body_index, 3:6] = angular_velocity(
+                prev_rot, rot, self.frame_dt
+            )
 
         return wp.transform(wp.vec3(*loc), wp.quat(*rot))
 
@@ -515,7 +565,8 @@ class Simulator(SimulatorBase):
         """
         substeps = max(self.substeps, 1)
         sim_dt = self.frame_dt / substeps
-        for _ in range(substeps):
+        for i in range(substeps):
+            self._apply_rigid_scales((i + 1) / substeps)
             self.state_0.clear_forces()
             self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(
@@ -677,6 +728,7 @@ class Simulator(SimulatorBase):
             return
         try:
             self._update_simulation_from_blender()
+            self._update_rigid_scales()
             self._update_pinned_particles()
             start_simulate = time.time()
             self.simulate()

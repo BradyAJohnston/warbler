@@ -55,7 +55,7 @@ class SimulationListItem(bpy.types.PropertyGroup):
                 "Simulate on the GPU via CUDA (faster, but a crash poisons the Blender CUDA context until restart)",
             ),
         ),
-        default="cpu",
+        default="cuda",
     )
     use_ground_plane: BoolProperty("Ground Plane", default=True)  # type: ignore
     ground_plane_vector: FloatVectorProperty("Ground Normal", default=(0, 0, 1))  # type: ignore
