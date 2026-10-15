@@ -15,6 +15,15 @@ The core idea: GN sets up geometry and attributes → warbler reads them at comp
 | Curves | particles + stretch/bend springs along each curve | `<source>_curves` (curves) |
 | Mesh with faces | cloth (`add_cloth_mesh`) | `<source>_mesh` (mesh) |
 | Mesh without faces | free particles | `<source>_mesh` (point cloud) |
+| Instances | one free rigid body each, shaped by `collider` | `<source>_instances` (point cloud + "Warbler Instances" modifier re-placing the source's instances) |
+
+### Currently reading (INSTANCE domain)
+
+| Attribute | Type | Use |
+|---|---|---|
+| `collider` | `INT` | Collision shape: 0 convex hull (default), 1 box, 2 sphere, 3 capsule, 4 triangle mesh (Set Collider node). Primitives fit the reference's scaled bounding box |
+| `velocity` | `FLOAT_VECTOR` | Initial linear velocity |
+| `density` | `FLOAT` | Density mass is computed from (default 1000) |
 
 ### Currently reading (POINT domain, every component)
 
@@ -68,6 +77,8 @@ Material properties below are **global** in Newton's XPBD (not per-particle). Re
 | `is_colliding` | `BOOLEAN` | POINT | Every output object — within 0.1 × radius of a rigid shape / ground |
 | `contact_force` | `FLOAT_VECTOR` | POINT | Every output object, VBD only — force from rigid shapes / ground [N] |
 | `wb.contact_force` | object prop | — | Rigid objects, VBD only — total force from particles [N] |
+| `instance_transform` | `FLOAT4X4` | POINT | Instances output — simulated world transform (scale kept) |
+| `velocity` | `FLOAT_VECTOR` | POINT | Instances output — body linear velocity |
 
 ### Planned
 
@@ -87,7 +98,7 @@ Material properties below are **global** in Newton's XPBD (not per-particle). Re
 
 ## Rigid body shapes to add
 
-Currently only CUBE is wired up.
+Rigid collection objects: only CUBE is wired up. Source instances already support convex hull / box / sphere / capsule / mesh via `collider`.
 
 | Shape | Newton API | Priority |
 |---|---|---|

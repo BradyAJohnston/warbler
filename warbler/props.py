@@ -57,6 +57,11 @@ class SimulationListItem(bpy.types.PropertyGroup):
         ),
         default="cuda",
     )
+    use_cuda_graph: BoolProperty(  # type: ignore
+        name="CUDA Graph",
+        description="Record each frame's substeps once and replay them on the GPU, removing per-kernel launch overhead (much faster for VBD cloth)",
+        default=True,
+    )
     use_ground_plane: BoolProperty("Ground Plane", default=True)  # type: ignore
     gravity: FloatProperty(  # type: ignore
         name="Gravity",
@@ -109,7 +114,7 @@ class SimulationListItem(bpy.types.PropertyGroup):
     temperature: FloatProperty(  # type: ignore
         name="Temperature",
         description=(
-            "Strength of random thermal kicks on particles (kT, in mass × "
+            "Strength of random thermal kicks on particles and rigid bodies (kT, in mass × "
             "length² / s²). Needs drag above 0. Visual, not physical units"
         ),
         default=0.0,
@@ -118,7 +123,7 @@ class SimulationListItem(bpy.types.PropertyGroup):
     drag: FloatProperty(  # type: ignore
         name="Drag",
         description=(
-            "Langevin drag on particles (1/s). Damps motion and, with "
+            "Langevin drag on particles and rigid bodies (1/s). Damps motion and, with "
             "temperature, drives the thermal jiggle"
         ),
         default=0.0,
@@ -184,6 +189,27 @@ class SimulationListItem(bpy.types.PropertyGroup):
         description="Cloth bending stiffness across mesh edges",
         default=1.0e1,
         min=0.0,
+    )
+    cloth_self_contact: BoolProperty(  # type: ignore
+        name="Self Collision",
+        description="VBD: cloth collides with itself (vertex-triangle and edge-edge contacts)",
+        default=True,
+    )
+    cloth_self_contact_margin: FloatProperty(  # type: ignore
+        name="Thickness",
+        description="VBD: distance at which cloth surfaces start pushing each other apart",
+        default=0.02,
+        min=0.0,
+        soft_max=0.5,
+        subtype="DISTANCE",
+    )
+    cloth_self_contact_gap: FloatProperty(  # type: ignore
+        name="Detection Gap",
+        description="VBD: extra distance searched for upcoming self contacts (about 0.5-1x the thickness)",
+        default=0.01,
+        min=0.0,
+        soft_max=0.5,
+        subtype="DISTANCE",
     )
     cloth_edge_kd: FloatProperty(  # type: ignore
         name="Bend Damping",
@@ -254,6 +280,25 @@ class SimulationListItem(bpy.types.PropertyGroup):
         name="Attach Damping",
         description="VBD: damping of the attachment springs",
         default=0.0,
+        min=0.0,
+    )
+    instance_ke: FloatProperty(  # type: ignore
+        name="Contact Stiffness",
+        description="Contact stiffness of the source's instance rigid bodies (VBD; "
+        "averaged with the other shape's)",
+        default=1.0e8,
+        min=0.0,
+    )
+    instance_kd: FloatProperty(  # type: ignore
+        name="Contact Damping",
+        description="Contact damping of the source's instance rigid bodies (VBD)",
+        default=5.0e5,
+        min=0.0,
+    )
+    instance_mu: FloatProperty(  # type: ignore
+        name="Friction",
+        description="Friction coefficient of the source's instance rigid bodies",
+        default=1.0,
         min=0.0,
     )
     rigid_decay_frames: IntProperty(  # type: ignore

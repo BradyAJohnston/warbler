@@ -10,9 +10,12 @@ import newton
 import numpy as np
 import warp as wp
 from bpy.types import Object
+from mathutils import Matrix
+from nodebpy import geometry as g
 
 from . import kernels, rigid
-from .geometryset import GeometryAttributes, GeometrySet
+from .geometryset import GeometryAttributes, GeometrySet, InstanceAttributes
+from .nodes import geometry as nodes
 from .props import SimulationListItem
 from .utils import (
     angular_velocity,
@@ -31,6 +34,9 @@ newton.use_coord_layout_targets = True
 
 # A particle is colliding when within this fraction of its radius of a shape
 CONTACT_TOLERANCE = 0.1
+
+# Collision shape of an instance's rigid body, by its INSTANCE ``collider`` value
+COLLIDERS = ("CONVEX_HULL", "BOX", "SPHERE", "CAPSULE", "MESH")
 
 
 class SimulatorBase(ABC):
@@ -141,6 +147,37 @@ class SourcePart:
         return "POINTCLOUD"
 
 
+@dataclass
+class InstancePart:
+    """The source's instances, each simulated as one rigid body.
+
+    ``body`` is each instance's body index (-1 when its reference has no mesh
+    and it is left where it is); ``world`` and ``scale`` are its starting world
+    matrix and scale, the scale being re-applied to the simulated transform.
+    """
+
+    body: np.ndarray
+    world: np.ndarray
+    scale: np.ndarray
+    output: db.BlenderObject | None = None
+
+    @property
+    def simulated(self) -> np.ndarray:
+        return self.body >= 0
+
+
+def quat_matrices(q: np.ndarray) -> np.ndarray:
+    """(N, 3, 3) rotation matrices of (N, 4) xyzw quaternions."""
+    x, y, z, w = q.T
+    return np.stack(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    ).transpose(2, 0, 1)
+
+
 def network_edges(position: np.ndarray, cutoff: float) -> np.ndarray:
     """(N, 2) index pairs ``i < j`` of every two points closer than ``cutoff``.
 
@@ -184,7 +221,10 @@ class Simulator(SimulatorBase):
 
     @property
     def outputs(self) -> list[db.BlenderObject]:
-        return [p.output for p in self.parts if p.output is not None]
+        outputs = [p.output for p in self.parts if p.output is not None]
+        if self.instances is not None and self.instances.output is not None:
+            outputs.append(self.instances.output)
+        return outputs
 
     # ============================================================================
     # Initialization
@@ -197,18 +237,19 @@ class Simulator(SimulatorBase):
         super().__init__()
         self.clock: int = 0
         self.parts: list[SourcePart] = []
+        self.instances: InstancePart | None = None
         self._pinned_indices: np.ndarray | None = None
         # (object, shape index) of each rigid box, for live scale updates
         self._rigid_shapes: list[tuple[Object, int]] = []
-        # Advanced every substep so the thermostat draws fresh noise
-        self._noise_seed: int = 0
+        # Recorded substep loop (see simulate()), and the settings it baked in
+        self._graph = None
+        self._graph_key: tuple | None = None
+        self._graph_warm = False
         # Network contacts (springs that can break), set up in finalize()
         self._contact_ids: wp.array | None = None
         self._contact_ke: wp.array | None = None
         self._contact_broken: wp.array | None = None
         self._spring_rest: np.ndarray | None = None
-        # (start, target) shape_scale to ramp between over this frame's substeps
-        self._scale_ramp: tuple[np.ndarray, np.ndarray] | None = None
         # Particles held on props.surface, set up in finalize()
         self._surface_ids: list[np.ndarray] = []
         self._surface_offsets: list[np.ndarray] = []
@@ -222,6 +263,8 @@ class Simulator(SimulatorBase):
     def _compile(self) -> None:
         self._free_model()
         previous = {p.component: p.output for p in self.parts if p.output is not None}
+        if self.instances is not None and self.instances.output is not None:
+            previous["instances"] = self.instances.output
         self.build()
         self.finalize()
         self._create_outputs(previous)
@@ -247,6 +290,12 @@ class Simulator(SimulatorBase):
             "_particle_contact_f",
             "_particle_colliding",
             "_body_contact_f",
+            "_no_contact_f",
+            "_no_body_q",
+            "_noise_seed",
+            "_scale_shapes",
+            "_scale_start",
+            "_scale_target",
         ):
             if hasattr(self, name):
                 delattr(self, name)
@@ -254,6 +303,9 @@ class Simulator(SimulatorBase):
         self._surface_mesh = None
         self._surface_indices = None
         self._observables = None
+        self._graph = None
+        self._graph_key = None
+        self._graph_warm = False
 
     def free(self) -> None:
         """Stop the simulation and release it, keeping the output objects.
@@ -275,6 +327,7 @@ class Simulator(SimulatorBase):
         )
         self.builder.default_particle_radius = DEFAULT_RADIUS
         self.parts = []
+        self.instances = None
         self._pinned_indices = None
         self._surface_ids: list[np.ndarray] = []
         self._surface_offsets: list[np.ndarray] = []
@@ -286,7 +339,9 @@ class Simulator(SimulatorBase):
             self.builder.add_ground_plane()
 
         if self.props.source is not None:
-            self._add_source(GeometrySet(self.props.source))
+            geo = GeometrySet(self.props.source)
+            self._add_source(geo)
+            self._add_instances(geo.instances)
 
     def finalize(self):
         if self.props.solver == "VBD":
@@ -311,6 +366,9 @@ class Simulator(SimulatorBase):
                 rigid_compliant_alm=True,
                 rigid_soft_contact_use_log_barrier=self.props.rigid_soft_log_barrier,
                 rigid_soft_enable_dat=self.props.rigid_soft_dat,
+                particle_enable_self_contact=self.uses_self_contact,
+                particle_self_contact_margin=self.props.cloth_self_contact_margin,
+                particle_self_contact_gap=self.props.cloth_self_contact_gap,
                 collision_pipeline=(
                     self.collision_pipeline if self._solver_collides else None
                 ),
@@ -329,6 +387,31 @@ class Simulator(SimulatorBase):
         self._init_network_contacts()
         self._init_surface()
         self._init_contact_outputs()
+        self._init_device_inputs()
+
+    def _init_device_inputs(self) -> None:
+        """Device-side copies of per-substep inputs, so the substep loop has no
+        host work and can be captured as a CUDA graph."""
+        device = self.model.device
+        # Advanced on the device every frame so the thermostat draws fresh noise
+        self._noise_seed = wp.zeros(1, dtype=wp.int32, device=device)
+        # Rigid box sizes ramped across each frame's substeps
+        shapes = [shape for _, shape in self._rigid_shapes]
+        self._scale_shapes = wp.array(shapes, dtype=wp.int32, device=device)
+        scale = np.zeros((len(shapes), 3), dtype=np.float32)
+        if shapes and self.model.shape_scale is not None:
+            scale = self.model.shape_scale.numpy()[shapes]
+        self._scale_start = wp.array(scale, dtype=wp.vec3, device=device)
+        self._scale_target = wp.array(scale, dtype=wp.vec3, device=device)
+
+    @property
+    def uses_self_contact(self) -> bool:
+        """VBD cloth self-collision (only meaningful with triangles)."""
+        return (
+            self.props.solver == "VBD"
+            and self.props.cloth_self_contact
+            and self.builder.tri_count > 0
+        )
 
     def _init_contact_outputs(self) -> None:
         """Per-particle / per-body contact arrays, filled on each frame's last substep.
@@ -346,6 +429,9 @@ class Simulator(SimulatorBase):
         self._body_contact_f = wp.zeros(
             max(self.model.body_count, 1), dtype=wp.vec3, device=device
         )
+        # Stand-ins when there are no reported forces / no rigid bodies
+        self._no_contact_f = wp.empty(0, dtype=wp.spatial_vector, device=device)
+        self._no_body_q = wp.empty(0, dtype=wp.transform, device=device)
         kind = self.solver.ObservableKind.CONTACT_F
         if self.props.solver == "VBD" and kind in self.solver.supported_observables:
             self._observables = self.solver.observables(
@@ -366,10 +452,10 @@ class Simulator(SimulatorBase):
         if self._observables is not None:
             contact_f = self._observables.contact_f
         else:
-            contact_f = wp.empty(0, dtype=wp.spatial_vector, device=self.model.device)
+            contact_f = self._no_contact_f
         body_q = self.state_0.body_q
         if body_q is None:
-            body_q = wp.empty(0, dtype=wp.transform, device=self.model.device)
+            body_q = self._no_body_q
         c = self.contacts
         wp.launch(
             kernels.gather_soft_contacts,
@@ -509,6 +595,127 @@ class Simulator(SimulatorBase):
                 self._rigid_shapes.append((obj, shape))
             else:
                 print(Warning(f"Unsupported shape {obj.wb.sim_shape}"))  # type: ignore
+
+    def _add_instances(self, instances: InstanceAttributes) -> None:
+        """Add each of the source's instances as a free rigid body.
+
+        The body starts at the instance's world location and rotation; its
+        scale goes into the collision shape, chosen per instance by the
+        INSTANCE ``collider`` attribute (an index into ``COLLIDERS``, convex
+        hull when absent). Optional ``velocity`` and ``density`` set the
+        starting linear velocity and the density mass is computed from.
+        """
+        count = len(instances)
+        source = self.props.source
+        if count == 0 or source is None:
+            return
+        mat = np.array(source.matrix_world, dtype=np.float64)
+        world = mat @ instances.transforms
+        props = instances.to_props()
+        collider = props.get("collider", np.zeros(count, dtype=np.int32))
+        velocity = props.get("velocity")
+        if velocity is not None:
+            velocity = velocity @ mat[:3, :3].T
+        density = props.get("density")
+        geometry = instances.reference_geometry()
+        reference = instances.reference_index
+        meshes: dict[tuple[int, str], newton.Mesh] = {}
+
+        base_cfg = self.builder.default_shape_cfg.copy()
+        base_cfg.ke = self.props.instance_ke
+        base_cfg.kd = self.props.instance_kd
+        base_cfg.mu = self.props.instance_mu
+
+        body = np.full(count, -1, dtype=np.int32)
+        scale = np.ones((count, 3))
+        for i in range(count):
+            geom = geometry[reference[i]] if reference[i] < len(geometry) else None
+            if geom is None:
+                continue
+            loc, rot, size = Matrix(world[i].tolist()).decompose()
+            scale[i] = (size.x, size.y, size.z)
+            body[i] = self.builder.add_body(
+                xform=wp.transform(wp.vec3(*loc), wp.quat(rot.x, rot.y, rot.z, rot.w))
+            )
+            if velocity is not None:
+                self.builder.body_qd[body[i]] = wp.spatial_vector(
+                    *velocity[i], 0.0, 0.0, 0.0
+                )
+            cfg = base_cfg
+            if density is not None:
+                cfg = cfg.copy()
+                cfg.density = float(density[i])
+            kind = (
+                COLLIDERS[int(collider[i])]
+                if 0 <= collider[i] < len(COLLIDERS)
+                else COLLIDERS[0]
+            )
+            self._add_collider(
+                int(body[i]), kind, geom, np.array(size), cfg, meshes, int(reference[i])
+            )
+        self.instances = InstancePart(body=body, world=world, scale=scale)
+
+    def _add_collider(
+        self,
+        body: int,
+        kind: str,
+        geometry: tuple[np.ndarray, np.ndarray],
+        scale: np.ndarray,
+        cfg: newton.ModelBuilder.ShapeConfig,
+        meshes: dict[tuple[int, str], newton.Mesh],
+        reference: int,
+    ) -> None:
+        """Give ``body`` a collision shape of ``kind`` fitted to ``geometry``.
+
+        Primitives fit the reference's scaled bounding box; hull and mesh
+        shapes share one ``newton.Mesh`` per reference, scaled per shape.
+        """
+        vertices, triangles = geometry
+        if kind in ("CONVEX_HULL", "MESH") and len(triangles) == 0:
+            kind = "BOX"  # nothing to build a mesh from
+        lo, hi = vertices.min(axis=0), vertices.max(axis=0)
+        centre = (lo + hi) / 2 * scale
+        half = np.maximum((hi - lo) / 2 * scale, 1e-4)
+        xform = wp.transform(wp.vec3(*centre), wp.quat_identity())
+        if kind == "BOX":
+            self.builder.add_shape_box(
+                body, xform=xform, hx=half[0], hy=half[1], hz=half[2], cfg=cfg
+            )
+        elif kind == "SPHERE":
+            self.builder.add_shape_sphere(
+                body, xform=xform, radius=float(half.max()), cfg=cfg
+            )
+        elif kind == "CAPSULE":
+            # Newton capsules run along Z; turn Z onto the longest axis
+            axis = int(half.argmax())
+            radius = float(np.delete(half, axis).max())
+            turn = {
+                0: wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 2),
+                1: wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -np.pi / 2),
+                2: wp.quat_identity(),
+            }[axis]
+            self.builder.add_shape_capsule(
+                body,
+                xform=wp.transform(wp.vec3(*centre), turn),
+                radius=radius,
+                half_height=max(float(half[axis]) - radius, 0.0),
+                cfg=cfg,
+            )
+        else:
+            key = (reference, kind)
+            if key not in meshes:
+                mesh = newton.Mesh(vertices, triangles.ravel())
+                if kind == "CONVEX_HULL":
+                    # A fresh mesh so mass and inertia come from the closed hull
+                    hull = mesh.compute_convex_hull()
+                    mesh = newton.Mesh(hull.vertices, hull.indices)
+                meshes[key] = mesh
+            add = (
+                self.builder.add_shape_convex_hull
+                if kind == "CONVEX_HULL"
+                else self.builder.add_shape_mesh
+            )
+            add(body, mesh=meshes[key], scale=wp.vec3(*scale), cfg=cfg)
 
     # ============================================================================
     # Source geometry → particles, springs and cloth
@@ -785,22 +992,16 @@ class Simulator(SimulatorBase):
         if hasattr(self.state_0, "body_qd") and self.state_0.body_qd is not None:
             body_velocities = self.state_0.body_qd.numpy()
 
-        new_transforms = []
-        for i, obj in enumerate(self.objects):
+        objects = self.objects
+        if not objects:
+            return
+        new_transforms = current_sim_transforms.copy()
+        for i, obj in enumerate(objects):
             rig = rigid.RigidObject(obj)
-
             if not rig.is_active:
-                transform = self._get_kinematic_body_transform(
+                new_transforms[i] = self._get_kinematic_body_transform(
                     obj, current_sim_transforms[i], body_velocities, i
                 )
-            else:
-                transform = wp.transform(
-                    wp.vec3(*current_sim_transforms[i, 0:3]),
-                    wp.quat(*current_sim_transforms[i, 3:7]),
-                )
-
-            new_transforms.append(transform)
-
         self.state_0.body_q.assign(new_transforms)
         if body_velocities is not None and self.state_0.body_qd is not None:
             self.state_0.body_qd.assign(body_velocities)
@@ -816,29 +1017,26 @@ class Simulator(SimulatorBase):
         solve would launch them. Mass and inertia are not updated, so for
         active bodies this only changes their collision size.
         """
-        self._scale_ramp = None
-        if not self._rigid_shapes or self.model.shape_scale is None:
+        if not self._rigid_shapes:
             return
-        start = self.model.shape_scale.numpy()
-        target = start.copy()
-        for obj, shape in self._rigid_shapes:
-            target[shape] = rigid.RigidObject(obj).half_extents()
-        if not np.allclose(start, target, rtol=1e-6, atol=1e-9):
-            self._scale_ramp = (start, target)
+        # The last ramp ended at its target, which is where this one starts
+        wp.copy(self._scale_start, self._scale_target)
+        target = [
+            rigid.RigidObject(obj).half_extents() for obj, _ in self._rigid_shapes
+        ]
+        self._scale_target.assign(np.array(target, dtype=np.float32))
 
     def _apply_rigid_scales(self, t: float) -> None:
         """Set rigid box sizes to fraction ``t`` of the way through the ramp."""
-        if self._scale_ramp is None:
+        if not self._rigid_shapes:
             return
-        start, target = self._scale_ramp
-        scale = start + (target - start) * t
-        assert self.model.shape_scale is not None
-        self.model.shape_scale.assign(scale)
-        if self.model.shape_collision_radius is not None:
-            radius = self.model.shape_collision_radius.numpy()
-            shapes = [shape for _, shape in self._rigid_shapes]
-            radius[shapes] = np.linalg.norm(scale[shapes], axis=1)
-            self.model.shape_collision_radius.assign(radius)
+        wp.launch(
+            kernels.lerp_shape_scale,
+            dim=len(self._rigid_shapes),
+            inputs=[self._scale_shapes, self._scale_start, self._scale_target, t],
+            outputs=[self.model.shape_scale, self.model.shape_collision_radius],
+            device=self.model.device,
+        )
 
     def _update_pinned_particles(self) -> None:
         """Re-read pinned particle positions from the GN source each frame.
@@ -937,30 +1135,107 @@ class Simulator(SimulatorBase):
             broken[self._contact_ids.numpy()] = self._contact_broken.numpy() == 1
         return broken
 
-    def _apply_thermostat(self, dt: float) -> None:
-        """Langevin drag + thermal noise on particles (``temperature``/``drag``)."""
+    @property
+    def _uses_thermostat(self) -> bool:
+        has_bodies = self.model.particle_count > 0 or self.model.body_count > 0
+        return has_bodies and self.props.drag > 0.0
+
+    def _apply_thermostat(self, dt: float, substep: int) -> None:
+        """Langevin drag + thermal noise (``temperature``/``drag``) on particles
+        and on dynamic rigid bodies (linear and angular)."""
         drag, kT = self.props.drag, self.props.temperature
-        if self.model.particle_count == 0 or drag <= 0.0:
+        if not self._uses_thermostat:
             return
-        self._noise_seed += 1
-        wp.launch(
-            kernels.langevin_forces,
-            dim=self.model.particle_count,
-            inputs=[
-                self.state_0.particle_qd,
-                self.model.particle_mass,
-                self.model.particle_flags,
-                drag,
-                kT,
-                dt,
-                self._noise_seed,
-            ],
-            outputs=[self.state_0.particle_f],
-            device=self.model.device,
+        if self.model.particle_count:
+            wp.launch(
+                kernels.langevin_forces,
+                dim=self.model.particle_count,
+                inputs=[
+                    self.state_0.particle_qd,
+                    self.model.particle_mass,
+                    self.model.particle_flags,
+                    drag,
+                    kT,
+                    dt,
+                    self._noise_seed,
+                    substep,
+                ],
+                outputs=[self.state_0.particle_f],
+                device=self.model.device,
+            )
+        if self.model.body_count:
+            wp.launch(
+                kernels.langevin_body_forces,
+                dim=self.model.body_count,
+                inputs=[
+                    self.state_0.body_q,
+                    self.state_0.body_qd,
+                    self.model.body_mass,
+                    self.model.body_inertia,
+                    self.model.body_flags,
+                    drag,
+                    kT,
+                    dt,
+                    self._noise_seed,
+                    substep,
+                ],
+                outputs=[self.state_0.body_f],
+                device=self.model.device,
+            )
+
+    def _graph_settings(self) -> tuple | None:
+        """Settings a recorded frame bakes in, or None if it can't be recorded.
+
+        Not recorded: the CPU and a ``surface`` (its mesh is rebuilt every
+        frame, changing the id baked into the projection kernel).
+        """
+        if (
+            not self.props.use_cuda_graph
+            or not self.model.device.is_cuda
+            or not wp.is_mempool_enabled(self.model.device)
+            or self._surface_mesh is not None
+        ):
+            return None
+        p = self.props
+        return (
+            self.substeps,
+            self.frame_dt,
+            p.drag,
+            p.temperature,
+            p.break_strain,
+            p.reform_strain,
         )
 
     def simulate(self):
-        """Execute one physics timestep following Newton's pattern:
+        """Advance one frame, replaying a recorded CUDA graph when possible.
+
+        Launching the solvers' kernels one by one from Python costs ~10 µs
+        each — VBD launches hundreds per frame, so cloth spent most of its
+        time on launch overhead. The frame is run normally once (solver
+        warm-up), then recorded and replayed until a baked-in setting changes.
+        """
+        key = self._graph_settings()
+        if key is None:
+            self._graph = None
+        elif self._graph is not None and key == self._graph_key:
+            wp.capture_launch(self._graph)
+            return
+        elif self._graph_warm:
+            try:
+                with wp.ScopedCapture(device=self.model.device) as capture:
+                    self._simulate_frame()
+            except Exception as e:  # noqa: BLE001 — fall back to plain launches
+                print(f"Warbler: CUDA graph capture failed, disabling it: {e}")
+                self.props.use_cuda_graph = False
+            else:
+                self._graph, self._graph_key = capture.graph, key
+                wp.capture_launch(self._graph)
+                return
+        self._graph_warm = key is not None
+        self._simulate_frame()
+
+    def _simulate_frame(self):
+        """Execute one frame of substeps following Newton's pattern:
         State → Solver → Updated State
         """
         substeps = max(self.substeps, 1)
@@ -968,7 +1243,7 @@ class Simulator(SimulatorBase):
         for i in range(substeps):
             self._apply_rigid_scales((i + 1) / substeps)
             self.state_0.clear_forces()
-            self._apply_thermostat(sim_dt)
+            self._apply_thermostat(sim_dt, i)
             last = i == substeps - 1
             if not self._solver_collides:
                 self.collision_pipeline.collide(self.state_0, self.contacts)
@@ -984,6 +1259,18 @@ class Simulator(SimulatorBase):
             self.state_0, self.state_1 = self.state_1, self.state_0
             self._project_to_surface()
             self._update_network_contacts()
+        if substeps % 2:
+            # End on the buffers the frame started from, so a recorded frame
+            # replays from the same state the pins / bodies were written to
+            self.state_1.assign(self.state_0)
+            self.state_0, self.state_1 = self.state_1, self.state_0
+        if self._uses_thermostat:
+            wp.launch(
+                kernels.advance_seed,
+                dim=1,
+                inputs=[self._noise_seed, substeps],
+                device=self.model.device,
+            )
         self._gather_contacts()
 
     # def _get_manual_body_transforms(self) -> dict[int, np.ndarray]:
@@ -1065,12 +1352,70 @@ class Simulator(SimulatorBase):
             if self._pinned_indices is not None:
                 part.output.store_named_attribute(pinned[part.indices], "pinned")
 
+        if self.instances is not None:
+            assert source is not None
+            name = f"{source.name}_instances"
+            obj = previous.pop("instances", None)
+            obj = obj.object if obj is not None else bpy.data.objects.get(name)
+            part = SourcePart(component="instances", start=0, count=0)
+            pos = self.instances.world[:, :3, 3]
+            if obj is not None and obj.type == "POINTCLOUD":
+                self.instances.output = self._rebuild_output(obj, part, pos)
+            else:
+                self.instances.output = self._new_output(name, part, pos)
+            self._add_instances_modifier(self.instances.output.object)
+            self._update_instance_output()
+
         # Parts that no longer exist in the source geometry
         for bob in previous.values():
             try:
                 bpy.data.objects.remove(bob.object)
             except ReferenceError:
                 pass  # already deleted by the user
+
+    def _add_instances_modifier(self, obj: bpy.types.Object) -> None:
+        """Give the instances output the modifier that re-places the source's instances."""
+        mod = obj.modifiers.get("Warbler Instances")
+        if not isinstance(mod, bpy.types.NodesModifier):
+            mod = obj.modifiers.new("Warbler Instances", "NODES")
+            assert isinstance(mod, bpy.types.NodesModifier)
+        tree = bpy.data.node_groups.get("Warbler Instances")
+        if not isinstance(tree, bpy.types.GeometryNodeTree):
+            with g.tree("Warbler Instances", is_modifier=True) as builder:
+                # The modifier feeds the object's geometry to the first input
+                points = builder.inputs.geometry("Geometry")
+                source = builder.inputs.object("Source")
+                (
+                    nodes.SimulatedInstances(points, source)
+                    >> builder.outputs.geometry("Geometry")
+                )
+            tree = builder.tree
+        mod.node_group = tree
+        assert tree.interface is not None
+        item = tree.interface.items_tree["Source"]
+        getattr(mod.properties.inputs, item.identifier).value = self.props.source  # ty: ignore[unresolved-attribute]
+
+    def _update_instance_output(self) -> None:
+        """Write each simulated instance's world transform and velocity."""
+        part = self.instances
+        if part is None or part.output is None or self.state_0.body_q is None:
+            return
+        world = part.world.copy()
+        velocity = np.zeros((len(world), 3), dtype=np.float32)
+        sim = part.simulated
+        body = part.body[sim]
+        q = self.state_0.body_q.numpy()[body]
+        world[sim, :3, :3] = quat_matrices(q[:, 3:7]) * part.scale[sim, None, :]
+        world[sim, :3, 3] = q[:, :3]
+        if self.state_0.body_qd is not None:
+            velocity[sim] = self.state_0.body_qd.numpy()[body, :3]
+        part.output.position = world[:, :3, 3]  # type: ignore[assignment]
+        part.output.store_named_attribute(
+            world.transpose(0, 2, 1).astype(np.float32),
+            "instance_transform",
+            atype="FLOAT4X4",
+        )
+        part.output.store_named_attribute(velocity, "velocity")
 
     def _new_output(
         self, name: str, part: SourcePart, pos: np.ndarray
@@ -1198,10 +1543,13 @@ class Simulator(SimulatorBase):
             self._update_surface()
             start_simulate = time.time()
             self.simulate()
+            # launches are asynchronous; wait so the compute time is real
+            wp.synchronize_device(self.model.device)
             self.props.time_compute = time.time() - start_simulate
             start_sync = time.time()
             self._update_blender_from_simulation()
             self._update_outputs()
+            self._update_instance_output()
             self.props.time_sync = time.time() - start_sync
             self.clock += 1
         except Exception as e:  # noqa: BLE001

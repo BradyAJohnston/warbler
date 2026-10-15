@@ -92,6 +92,15 @@ def draw_geometry_info(
             domain = DOMAIN_SHORT.get(attr.domain, attr.domain)
             dtype = TYPE_SHORT.get(attr.data_type, attr.data_type)
             col.label(text=f"  {attr.name}  ({dtype}, {domain})", icon="CHECKMARK")
+    instances = geo.instances
+    if len(instances):
+        found = True
+        col.label(
+            text=f"Instances: {len(instances):,} rigid bodies",
+            icon="OUTLINER_OB_GROUP_INSTANCE",
+        )
+        for name in instances.to_props():
+            col.label(text=f"  {name}  (Instance)", icon="CHECKMARK")
     if not found:
         col.label(text="No geometry data", icon="ERROR")
 
@@ -205,6 +214,9 @@ class WB_PT_WarblerPanel(Panel):
 
         col.prop(item, "solver")
         col.prop(item, "device")
+        sub = col.row()
+        sub.active = item.device == "cuda"
+        sub.prop(item, "use_cuda_graph")
         col.prop(item, "substeps")
         col.prop(item, "iterations")
 
@@ -252,6 +264,13 @@ class WB_PT_WarblerPanel(Panel):
             col.prop(item, "cloth_tri_kd")
             col.prop(item, "cloth_edge_ke")
             col.prop(item, "cloth_edge_kd")
+            sub = col.column()
+            sub.active = item.solver == "VBD"
+            sub.prop(item, "cloth_self_contact")
+            row = sub.column()
+            row.active = item.solver == "VBD" and item.cloth_self_contact
+            row.prop(item, "cloth_self_contact_margin")
+            row.prop(item, "cloth_self_contact_gap")
 
         header, panel = create_panel(layout, "contacts", default_closed=True)
         header.label(text="Contacts")
@@ -275,6 +294,11 @@ class WB_PT_WarblerPanel(Panel):
             sub.active = item.solver == "VBD"
             sub.prop(item, "attach_stiffness")
             sub.prop(item, "attach_damping")
+            col.separator()
+            col.label(text="Source Instances")
+            col.prop(item, "instance_ke")
+            col.prop(item, "instance_kd")
+            col.prop(item, "instance_mu")
 
 
 def move_above_physics_panels() -> None:

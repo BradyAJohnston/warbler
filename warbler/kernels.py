@@ -3,6 +3,9 @@
 import warp as wp
 
 PARTICLE_ACTIVE = wp.constant(1)  # newton.ParticleFlags.ACTIVE
+BODY_KINEMATIC = wp.constant(2)  # newton.BodyFlags.KINEMATIC
+# Offsets the bodies' random streams from the particles' (same seed, same tid)
+BODY_STREAM = wp.constant(1 << 30)
 
 
 @wp.kernel
@@ -13,7 +16,8 @@ def langevin_forces(
     drag: float,
     kT: float,
     dt: float,
-    seed: int,
+    seed: wp.array[wp.int32],
+    substep: int,
     particle_f: wp.array[wp.vec3],
 ):
     """Add Langevin drag and random thermal kicks to each active particle.
@@ -21,15 +25,92 @@ def langevin_forces(
     ``f = -drag·m·v + sqrt(2·drag·m·kT / dt)·N(0, 1)``, which holds each
     velocity component at variance ``kT / m``. The solvers integrate
     ``particle_f``, so this runs after ``clear_forces()`` each substep.
+    The seed lives on the device (``advance_seed``) so a captured CUDA graph
+    still draws fresh noise every frame.
     """
     tid = wp.tid()
     m = particle_mass[tid]
     if (particle_flags[tid] & PARTICLE_ACTIVE) == 0 or m <= 0.0:
         return
-    rng = wp.rand_init(seed, tid)  # ty: ignore[invalid-argument-type]
+    rng = wp.rand_init(seed[0] + substep, tid)  # ty: ignore[invalid-argument-type]
     noise = wp.vec3(wp.randn(rng), wp.randn(rng), wp.randn(rng))
     kick = wp.sqrt(2.0 * drag * m * kT / dt)
     particle_f[tid] = particle_f[tid] - drag * m * particle_qd[tid] + kick * noise  # ty: ignore[invalid-assignment]
+
+
+@wp.kernel
+def langevin_body_forces(
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],  # ty: ignore[invalid-type-form]
+    body_mass: wp.array[float],
+    body_inertia: wp.array[wp.mat33],
+    body_flags: wp.array[wp.int32],
+    drag: float,
+    kT: float,
+    dt: float,
+    seed: wp.array[wp.int32],
+    substep: int,
+    body_f: wp.array[wp.spatial_vector],  # ty: ignore[invalid-type-form]
+):
+    """``langevin_forces`` for rigid bodies: linear and angular.
+
+    The force uses the mass, the torque the inertia tensor: in the body frame
+    ``τ = -drag·I·ω + sqrt(2·drag·kT / dt)·√I·N(0, 1)`` with ``√I`` from its
+    eigen-decomposition, which holds each rotational mode at ``kT``. Newton's
+    ``body_f`` is a world-frame wrench about the centre of mass.
+    """
+    tid = wp.tid()
+    m = body_mass[tid]
+    if (body_flags[tid] & BODY_KINEMATIC) != 0 or m <= 0.0:
+        return
+    rng = wp.rand_init(seed[0] + substep, tid + BODY_STREAM)
+    qd = body_qd[tid]
+    v = wp.spatial_top(qd)
+    w = wp.spatial_bottom(qd)
+    kick = wp.sqrt(2.0 * drag * kT / dt)
+
+    noise = wp.vec3(wp.randn(rng), wp.randn(rng), wp.randn(rng))
+    f = -drag * m * v + kick * wp.sqrt(m) * noise
+
+    rot = wp.transform_get_rotation(body_q[tid])
+    inertia = body_inertia[tid]
+    axes, moments = wp.eig3(inertia)
+    root = wp.diag(
+        wp.vec3(
+            wp.sqrt(wp.max(moments[0], 0.0)),  # ty: ignore[not-subscriptable]
+            wp.sqrt(wp.max(moments[1], 0.0)),  # ty: ignore[not-subscriptable]
+            wp.sqrt(wp.max(moments[2], 0.0)),  # ty: ignore[not-subscriptable]
+        )
+    )
+    noise = wp.vec3(wp.randn(rng), wp.randn(rng), wp.randn(rng))
+    w_body = wp.quat_rotate_inv(rot, w)
+    sqrt_inertia = axes * root * wp.transpose(axes)  # ty: ignore[unsupported-operator]
+    tau_body = -drag * (inertia * w_body) + kick * (sqrt_inertia * noise)
+    tau = wp.quat_rotate(rot, tau_body)
+
+    body_f[tid] = body_f[tid] + wp.spatial_vector(f, tau)  # ty: ignore[invalid-assignment]
+
+
+@wp.kernel
+def advance_seed(seed: wp.array[wp.int32], count: int):
+    seed[0] = seed[0] + count  # ty: ignore[invalid-assignment]
+
+
+@wp.kernel
+def lerp_shape_scale(
+    shapes: wp.array[wp.int32],
+    start: wp.array[wp.vec3],
+    target: wp.array[wp.vec3],
+    t: float,
+    shape_scale: wp.array[wp.vec3],
+    shape_collision_radius: wp.array[float],
+):
+    """Set box half-extents ``t`` of the way from ``start`` to ``target``,
+    with the broadphase radius (``‖half-extents‖``) to match."""
+    tid = wp.tid()
+    scale = start[tid] + (target[tid] - start[tid]) * t
+    shape_scale[shapes[tid]] = scale  # ty: ignore[invalid-assignment]
+    shape_collision_radius[shapes[tid]] = wp.length(scale)  # ty: ignore[invalid-assignment]
 
 
 @wp.kernel

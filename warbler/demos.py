@@ -8,13 +8,16 @@ match the Newton example it is modelled on.
 
 import math
 from collections.abc import Callable
+from typing import Literal
 
+import bmesh
 import bpy
 import databpy as db
 import numpy as np
 from nodebpy import geometry as g
 
 from .manager import get_manager
+from .nodes import geometry as nodes
 from .props import SimulationListItem
 from .simulation import Simulator
 from .utils import get_scene
@@ -81,14 +84,9 @@ def particle_grid_tree() -> bpy.types.GeometryNodeTree:
         mass = tree.inputs.float("Mass", 0.02, min_value=0.0)
         jitter = tree.inputs.float("Jitter", 0.002, min_value=0.0)
 
-        idx = g.Index()
-        cell_index = (idx % dim_x, (idx // dim_x) % dim_y, idx // (dim_x * dim_y))
-        offset = g.RandomValue.vector(min=-jitter, max=jitter, seed=1)
-        position = origin + g.CombineXYZ(*cell_index) * cell + offset
-
         (
-            g.Points(dim_x * dim_y * dim_z, position=position, radius=radius)
-            >> g.StoreNamedAttribute.point.float(name="mass", value=mass)
+            nodes.PointGrid(dim_x, dim_y, dim_z, cell, origin, jitter=jitter, seed=1)
+            >> nodes.SetParticles(mass=mass, radius=radius)
             >> tree.outputs.geometry("Geometry")
         )
     return tree.tree
@@ -108,7 +106,8 @@ def particles(context: bpy.types.Context) -> Simulator:
 
 
 def hanging_cloth_tree(
-    name: str = "Warbler Hanging Cloth", edge_attribute: str = "pinned"
+    name: str = "Warbler Hanging Cloth",
+    edge_attribute: Literal["pinned", "attach"] = "pinned",
 ) -> bpy.types.GeometryNodeTree:
     """A cloth grid pinned along one edge, as ``add_cloth_grid(fix_left=True)``.
 
@@ -124,23 +123,11 @@ def hanging_cloth_tree(
         mass = tree.inputs.float("Mass", 0.1, min_value=0.0)
         radius = tree.inputs.float("Radius", 0.05, min_value=0.001)
 
-        size_x = dim_x * cell
-        size_y = dim_y * cell
-        grid = g.Grid(size_x, size_y, dim_x + 1, dim_y + 1)
-        # Grid is centred; move its corner to the origin before rotating.
-        corner = g.TransformGeometry(grid, translation=(size_x / 2, size_y / 2, 0))  # ty: ignore[invalid-argument-type]
-        cloth = g.TransformGeometry(
-            corner,
-            translation=(0, 0, height),  # ty: ignore[invalid-argument-type]
-            rotation=(0, 0, math.pi / 2),
-        )
-        pinned = g.Position().o.position.y < cell * 0.01
-
+        cloth = nodes.ClothGrid(dim_x, dim_y, cell, height)
+        hold = nodes.SetAttached if edge_attribute == "attach" else nodes.SetPinned
         (
-            cloth
-            >> g.StoreNamedAttribute.point.boolean(name=edge_attribute, value=pinned)
-            >> g.StoreNamedAttribute.point.float(name="mass", value=mass)
-            >> g.StoreNamedAttribute.point.float(name="radius", value=radius)
+            hold(cloth.o.mesh, cloth.o.edge)
+            >> nodes.SetParticles(mass=mass, radius=radius)
             >> tree.outputs.geometry("Geometry")
         )
     return tree.tree
@@ -207,10 +194,8 @@ def hanging_ropes_tree() -> bpy.types.GeometryNodeTree:
         )
 
         (
-            swayed
-            >> g.StoreNamedAttribute.point.boolean(name="pinned", value=pinned)
-            >> g.StoreNamedAttribute.point.float(name="mass", value=mass)
-            >> g.SetCurveRadius(radius=radius)
+            nodes.SetPinned(swayed, pinned)
+            >> nodes.SetParticles(mass=mass, radius=radius)
             >> tree.outputs.geometry("Geometry")
         )
     return tree.tree
@@ -313,9 +298,8 @@ def membrane_lipids_tree(surface: bpy.types.Object) -> bpy.types.GeometryNodeTre
         lipids.current >> lipids.next
         (
             lipids.result
-            >> g.StoreNamedAttribute.point.float(name="radius", value=radius)
-            >> g.StoreNamedAttribute.point.float(name="mass", value=mass)
-            >> g.StoreNamedAttribute.point.boolean(name="on_surface", value=True)
+            >> nodes.SetParticles(mass=mass, radius=radius)
+            >> nodes.SetOnSurface()
             >> g.StoreNamedAttribute.point.integer(
                 name="vesicle", value=g.Position().o.position.x > 0
             )
@@ -448,6 +432,78 @@ def carried_cloth(context: bpy.types.Context) -> Simulator:
 
 
 # ============================================================================
+# Instances → rigid bodies — falling monkeys
+# ============================================================================
+
+
+def _monkey(name: str = "Warbler Monkey") -> bpy.types.Object:
+    """A Suzanne object to instance, hidden so only the simulated copies show."""
+    obj = bpy.data.objects.get(name)
+    if obj is None:
+        mesh = bpy.data.meshes.new(name)
+        bm = bmesh.new()
+        bmesh.ops.create_monkey(bm)
+        bm.to_mesh(mesh)
+        bm.free()
+        for poly in mesh.polygons:
+            poly.use_smooth = True
+        obj = bpy.data.objects.new(name, mesh)
+        get_scene().collection.objects.link(obj)
+    obj.hide_set(True)
+    obj.hide_render = True
+    return obj
+
+
+def falling_monkeys_tree(monkey: bpy.types.Object) -> bpy.types.GeometryNodeTree:
+    """A block of randomly turned Suzanne instances, each one a rigid body,
+    with the collision shape from "Collider" (``nodes.SetCollider``)."""
+    with g.tree("Warbler Falling Monkeys", clear=True, is_modifier=True) as tree:
+        dim_x = tree.inputs.integer("Dim X", 16, min_value=1)
+        dim_y = tree.inputs.integer("Dim Y", 16, min_value=1)
+        dim_z = tree.inputs.integer("Dim Z", 10, min_value=1)
+        spacing = tree.inputs.float("Spacing", 1.5, min_value=0.01)
+        height = tree.inputs.float("Height", 2.0)
+        size = tree.inputs.float("Scale", 0.5, min_value=0.01)
+        collider = tree.inputs.menu("Collider", "Convex Hull")
+        seed = tree.inputs.integer("Seed", 0)
+
+        points = nodes.PointGrid(
+            dim_x,
+            dim_y,
+            dim_z,
+            spacing,
+            g.CombineXYZ(z=height),
+            centre=True,
+            jitter=0.1,
+            seed=seed,
+        )
+        rotation = g.RandomValue.vector(min=0, max=2 * math.pi, seed=seed + 1)
+        (
+            g.InstanceOnPoints(
+                points,
+                instance=g.ObjectInfo(monkey).o.geometry,
+                rotation=rotation,
+                scale=size,
+            )
+            >> nodes.SetCollider(shape=collider)
+            >> tree.outputs.geometry("Geometry")
+        )
+    return tree.tree
+
+
+def falling_monkeys(context: bpy.types.Context) -> Simulator:
+    """Thousands of instanced Suzannes dropped in a heap (XPBD rigid bodies)."""
+    source = _source_object("FallingMonkeys", falling_monkeys_tree(_monkey()))
+    # The output re-places these instances; hide the originals under it
+    source.hide_set(True)
+    sim = _new_simulation(context, source)
+    sim.props.solver = "XPBD"
+    sim.props.use_ground_plane = True
+    get_scene().frame_end = 300
+    return sim
+
+
+# ============================================================================
 # Protein — elastic network model on a Molecular Nodes molecule
 # ============================================================================
 
@@ -539,17 +595,13 @@ def protein_network_tree(molecule: bpy.types.Object) -> bpy.types.GeometryNodeTr
         )
 
         (
-            pulled
-            >> g.StoreNamedAttribute.point.boolean(
-                name="pinned", value=pin_termini & is_end
-            )
+            nodes.SetPinned(pulled, pin_termini & is_end)
             >> g.StoreNamedAttribute.point.integer(name="domain", value=domain)
             >> g.StoreNamedAttribute.point.float(name="stiffness", value=stiffness)
             >> g.StoreNamedAttribute.edge.float(
                 name="bond_stiffness", value=bond_stiffness
             )
-            >> g.StoreNamedAttribute.point.float(name="mass", value=mass)
-            >> g.StoreNamedAttribute.point.float(name="radius", value=radius)
+            >> nodes.SetParticles(mass=mass, radius=radius)
             >> tree.outputs.geometry("Geometry")
         )
     return tree.tree
@@ -616,6 +668,11 @@ DEMOS: dict[str, tuple[str, str, Callable[[bpy.types.Context], Simulator]]] = {
         "Carried Cloth",
         "Cloth attached to an animated bar, coloured by contact (VBD)",
         carried_cloth,
+    ),
+    "FALLING_MONKEYS": (
+        "Falling Monkeys",
+        "Thousands of instanced meshes as rigid bodies (XPBD)",
+        falling_monkeys,
     ),
     "MEMBRANE_FUSION": (
         "Membrane Fusion",

@@ -4,6 +4,7 @@ from bpy.props import PointerProperty
 from bpy.utils import register_class, unregister_class
 
 from . import manager, ops, panel, props
+from .nodes import library
 
 CLASSES = ops.CLASSES + props.CLASSES + panel.CLASSES
 
@@ -16,6 +17,7 @@ def register():
     bpy.types.Object.wb = PointerProperty(type=props.WarblerObjectProperties)  # type: ignore
     bpy.types.Scene.wb = PointerProperty(type=props.WarblerSceneProperties)  # type: ignore
     frame_change_post.append(manager._step_simulations)
+    library.register()
 
 
 def unregister():
@@ -24,6 +26,7 @@ def unregister():
     del bpy.types.Scene.SimulationManager  # type: ignore
     # del bpy.types.Scene.wb_sim_list
     del bpy.types.Object.wb  # type: ignore
+    library.unregister()
     try:
         frame_change_post.remove(manager._step_simulations)
     except ValueError:

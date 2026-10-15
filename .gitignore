@@ -11,3 +11,8 @@
 .extbpy/
 warbler/blender_manifest.toml
 warbler/wheels/
+# node asset library, built from warbler/nodes (python -m nodebpy.assets build)
+warbler/assets/nodes.blend
+warbler/assets/nodes.blend.stamp
+warbler/assets/blender_assets.cats.txt
+*.blend1

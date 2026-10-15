@@ -52,9 +52,28 @@ blender_version_min = "5.2.0"
 platforms = ["linux-x64", "windows-x64", "macos-arm64"]
 tags = ["3D View", "Animation", "Bake", "Physics"]
 copyright = ["2024 Brady Johnston"]
+# Built (python -m nodebpy.assets build), not committed
+required_files = ["warbler/assets/nodes.blend"]
+# Added to the default excludes (__pycache__/, .*, /*.zip)
+paths_exclude_pattern = ["*.blend[1-9]", "*.stamp"]
 
 [tool.extbpy.permissions]
 files = "Saving cached simulations to disk"
+
+# The node-asset pipeline (python -m nodebpy.assets build|dump|ensure|check):
+# warbler/nodes/ is the source of truth, warbler/assets/nodes.blend the built,
+# untracked asset library. See CLAUDE.md "Node groups".
+[tool.nodebpy.assets]
+source = "warbler/nodes"
+blend = "warbler/assets/nodes.blend"
+typed-api = true
+add-reroutes = true
+split-inputs = true
+
+[tool.ruff.lint.per-file-ignores]
+# Dumped by nodebpy: _tree_properties is a ClassVar on the nodebpy base, and
+# the dump would overwrite an annotation or noqa added here
+"warbler/nodes/geometry/*" = ["RUF012"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

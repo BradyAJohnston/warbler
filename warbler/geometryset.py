@@ -209,3 +209,86 @@ class GeometrySet:
         if isinstance(data, bpy.types.Mesh):
             return len(data.vertices)
         return 0
+
+    @property
+    def instances(self) -> "InstanceAttributes":
+        """The top-level instances — simulated as rigid bodies."""
+        if self._eval_geom is None:
+            return InstanceAttributes(None, [], self)
+        return InstanceAttributes(
+            self._eval_geom.instances_pointcloud(),  # type: ignore[attr-defined]
+            list(self._eval_geom.instance_references()),  # type: ignore[attr-defined]
+            self,
+        )
+
+
+# INSTANCE-domain attributes warbler reads for rigid bodies
+INSTANCE_ATTRIBUTES = ("collider", "velocity", "density")
+
+
+def _reference_mesh(reference: object) -> bpy.types.Mesh | None:
+    """The mesh of one instance reference (a geometry set, object or collection)."""
+    if isinstance(reference, bpy.types.Object):
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        reference = reference.evaluated_get(depsgraph).evaluated_geometry()  # type: ignore[attr-defined]
+    data = getattr(reference, "mesh", None)
+    return data if isinstance(data, bpy.types.Mesh) else None
+
+
+class InstanceAttributes:
+    """The instances of an evaluated geometry: one transform per instance, each
+    pointing (``reference_index``) at one of a list of referenced geometries.
+    """
+
+    def __init__(
+        self,
+        pointcloud: bpy.types.PointCloud | None,
+        references: list,
+        owner: GeometrySet,
+    ):
+        self._data = pointcloud
+        self._references = references
+        self._owner = owner
+
+    def __len__(self) -> int:
+        if self._data is None:
+            return 0
+        return len(self._data.points)
+
+    @property
+    def transforms(self) -> np.ndarray:
+        """(N, 4, 4) instance matrices, translation in the last column."""
+        if self._data is None:
+            return np.zeros((0, 4, 4), dtype=np.float32)
+        attr = self._data.attributes["instance_transform"]
+        return db.Attribute(attr).as_array().transpose(0, 2, 1)
+
+    @property
+    def reference_index(self) -> np.ndarray:
+        if self._data is None:
+            return np.zeros(0, dtype=np.int32)
+        return db.Attribute(self._data.attributes[".reference_index"]).as_array()
+
+    def to_props(self) -> dict[str, np.ndarray]:
+        """The subset of INSTANCE attributes warbler uses as rigid body inputs."""
+        if self._data is None:
+            return {}
+        attrs = self._data.attributes
+        return {
+            name: db.Attribute(attrs[name]).as_array()
+            for name in INSTANCE_ATTRIBUTES
+            if name in attrs
+        }
+
+    def reference_geometry(self) -> list[tuple[np.ndarray, np.ndarray] | None]:
+        """(vertices, (M, 3) triangles) of each reference, None if it has no mesh."""
+        out: list[tuple[np.ndarray, np.ndarray] | None] = []
+        for reference in self._references:
+            mesh = _reference_mesh(reference)
+            if mesh is None or len(mesh.vertices) == 0:
+                out.append(None)
+                continue
+            vertices = np.zeros(len(mesh.vertices) * 3, dtype=np.float32)
+            mesh.vertices.foreach_get("co", vertices)
+            out.append((vertices.reshape(-1, 3), GeometryAttributes(mesh).triangles))
+        return out
