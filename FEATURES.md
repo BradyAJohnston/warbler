@@ -65,14 +65,15 @@ Material properties below are **global** in Newton's XPBD (not per-particle). Re
 | `velocity` | `FLOAT_VECTOR` | POINT | Every output object |
 | `radius` | `FLOAT` | POINT | Every output object (at compile) |
 | `pinned` | `BOOLEAN` | POINT | Every output object (at compile) |
+| `is_colliding` | `BOOLEAN` | POINT | Every output object — within 0.1 × radius of a rigid shape / ground |
+| `contact_force` | `FLOAT_VECTOR` | POINT | Every output object, VBD only — force from rigid shapes / ground [N] |
+| `wb.contact_force` | object prop | — | Rigid objects, VBD only — total force from particles [N] |
 
 ### Planned
 
 | Attribute | Type | Domain | Source | Priority |
 |---|---|---|---|---|
 | `speed` | `FLOAT` | POINT | `‖velocity‖` | low — convenience for GN drivers |
-| `contact_force` | `FLOAT_VECTOR` | POINT | `state_0.particle_f` after step | medium |
-| `is_colliding` | `BOOLEAN` | POINT | `Contacts` object | medium |
 | `contact_normal` | `FLOAT_VECTOR` | POINT | `Contacts` object | low |
 
 ---

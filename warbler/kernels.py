@@ -101,3 +101,64 @@ def project_to_surface(
     particle_q[i] = point + n * offset[tid]  # ty: ignore[invalid-assignment]
     qd = particle_qd[i]
     particle_qd[i] = qd - wp.dot(qd, n) * n  # ty: ignore[invalid-assignment]
+
+
+@wp.kernel
+def gather_soft_contacts(
+    soft_contact_count: wp.array[int],
+    soft_contact_indices: wp.array[wp.vec3i],
+    soft_contact_barycentric: wp.array[wp.vec3],
+    soft_contact_shape: wp.array[int],
+    soft_contact_body_pos: wp.array[wp.vec3],
+    soft_contact_normal: wp.array[wp.vec3],
+    shape_body: wp.array[int],
+    body_q: wp.array[wp.transform],
+    particle_q: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    contact_f: wp.array[wp.spatial_vector],  # ty: ignore[invalid-type-form]
+    rigid_contact_max: int,
+    tolerance: float,
+    particle_contact_f: wp.array[wp.vec3],
+    particle_colliding: wp.array[wp.int32],
+    body_contact_f: wp.array[wp.vec3],
+):
+    """Per-particle contact state from the particle/rigid-shape contact records.
+
+    A record's particles are colliding when the contact point is within
+    ``tolerance`` × radius of the shape surface. ``contact_f`` holds the
+    solver's reported wrench per record (rigid rows first, then soft rows,
+    the force on the shape's body); pass an empty array when the solver
+    doesn't report soft contacts. The force on the particles is the negation,
+    split by the record's barycentric weights.
+    """
+    tid = wp.tid()
+    if tid >= soft_contact_count[0]:
+        return
+    idx = soft_contact_indices[tid]
+    bary = soft_contact_barycentric[tid]
+    body = shape_body[soft_contact_shape[tid]]
+    X_wb = wp.transform_identity()
+    if body >= 0:
+        X_wb = body_q[body]
+    surface = wp.transform_point(X_wb, soft_contact_body_pos[tid])  # ty: ignore[no-matching-overload]
+
+    x = wp.vec3(0.0)
+    r = 0.0
+    for k in range(3):
+        if idx[k] >= 0:
+            x += bary[k] * particle_q[idx[k]]
+            r += bary[k] * particle_radius[idx[k]]
+    gap = wp.dot(soft_contact_normal[tid], x - surface) - r
+
+    f = wp.vec3(0.0)
+    if contact_f.shape[0] > 0:
+        f = wp.spatial_top(contact_f[rigid_contact_max + tid])  # ty: ignore[unsupported-operator]
+        if body >= 0:
+            wp.atomic_add(body_contact_f, body, f)  # ty: ignore[invalid-argument-type]
+
+    for k in range(3):
+        p = idx[k]
+        if p >= 0 and bary[k] > 0.0:
+            wp.atomic_add(particle_contact_f, p, -f * bary[k])  # ty: ignore[invalid-argument-type, unsupported-operator]
+            if gap <= tolerance * r:
+                particle_colliding[p] = 1  # ty: ignore[invalid-assignment]

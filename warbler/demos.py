@@ -107,13 +107,16 @@ def particles(context: bpy.types.Context) -> Simulator:
 # ============================================================================
 
 
-def hanging_cloth_tree() -> bpy.types.GeometryNodeTree:
+def hanging_cloth_tree(
+    name: str = "Warbler Hanging Cloth", edge_attribute: str = "pinned"
+) -> bpy.types.GeometryNodeTree:
     """A cloth grid pinned along one edge, as ``add_cloth_grid(fix_left=True)``.
 
     Newton builds the grid with its corner at ``pos`` and rotates it 90° about
-    Z, so the pinned (left) edge lies along world Y at x = 0.
+    Z, so the pinned (left) edge lies along world Y at x = 0. The edge is
+    tagged with ``edge_attribute`` (``attach`` holds it to a rigid body instead).
     """
-    with g.tree("Warbler Hanging Cloth", clear=True, is_modifier=True) as tree:
+    with g.tree(name, clear=True, is_modifier=True) as tree:
         dim_x = tree.inputs.integer("Dim X", 64, min_value=1)
         dim_y = tree.inputs.integer("Dim Y", 32, min_value=1)
         cell = tree.inputs.float("Cell Size", 0.1, min_value=0.001)
@@ -135,7 +138,7 @@ def hanging_cloth_tree() -> bpy.types.GeometryNodeTree:
 
         (
             cloth
-            >> g.StoreNamedAttribute.point.boolean(name="pinned", value=pinned)
+            >> g.StoreNamedAttribute.point.boolean(name=edge_attribute, value=pinned)
             >> g.StoreNamedAttribute.point.float(name="mass", value=mass)
             >> g.StoreNamedAttribute.point.float(name="radius", value=radius)
             >> tree.outputs.geometry("Geometry")
@@ -147,7 +150,12 @@ def cloth(context: bpy.types.Context) -> Simulator:
     """Cloth hanging from one edge, swinging down under gravity."""
     source = _source_object("HangingCloth", hanging_cloth_tree())
     sim = _new_simulation(context, source)
-    item = sim.props
+    _cloth_settings(sim.props)
+    return sim
+
+
+def _cloth_settings(item: SimulationListItem) -> None:
+    """example_cloth_hanging's VBD cloth parameters."""
     item.solver = "VBD"
     item.cloth_tri_ke = 1.0e3
     item.cloth_tri_ka = 1.0e3
@@ -157,7 +165,6 @@ def cloth(context: bpy.types.Context) -> Simulator:
     item.soft_contact_ke = 1.0e2
     item.soft_contact_kd = 1.0e2
     item.soft_contact_mu = 1.0
-    return sim
 
 
 # ============================================================================
@@ -317,17 +324,17 @@ def membrane_lipids_tree(surface: bpy.types.Object) -> bpy.types.GeometryNodeTre
     return tree.tree
 
 
-def _vesicle_material() -> bpy.types.Material:
-    """Colour lipids by the ``vesicle`` they started on."""
-    mat = bpy.data.materials.get("Warbler Vesicle")
+def _attribute_material(name: str, attribute_name: str) -> bpy.types.Material:
+    """Blue where ``attribute_name`` is 0, orange where it is 1."""
+    mat = bpy.data.materials.get(name)
     if mat is not None:
         return mat
-    mat = bpy.data.materials.new("Warbler Vesicle")
+    mat = bpy.data.materials.new(name)
     tree = mat.node_tree
     assert tree is not None
     bsdf = tree.nodes["Principled BSDF"]
     attribute = tree.nodes.new("ShaderNodeAttribute")
-    attribute.attribute_name = "vesicle"  # ty: ignore[unresolved-attribute]
+    attribute.attribute_name = attribute_name  # ty: ignore[unresolved-attribute]
     mix = tree.nodes.new("ShaderNodeMix")
     mix.data_type = "RGBA"  # ty: ignore[unresolved-attribute]
     mix.inputs[6].default_value = (0.1, 0.45, 0.9, 1.0)  # ty: ignore[unresolved-attribute]
@@ -348,7 +355,8 @@ def membrane_fusion(context: bpy.types.Context) -> Simulator:
         output = bpy.data.objects.new(name, bpy.data.pointclouds.new(name))
         get_scene().collection.objects.link(output)
     output.data.materials.clear()  # ty: ignore[unresolved-attribute]
-    output.data.materials.append(_vesicle_material())  # ty: ignore[unresolved-attribute]
+    # Colour lipids by the vesicle they started on
+    output.data.materials.append(_attribute_material("Warbler Vesicle", "vesicle"))  # ty: ignore[unresolved-attribute]
 
     sim = _new_simulation(context, source)
     item = sim.props
@@ -359,6 +367,83 @@ def membrane_fusion(context: bpy.types.Context) -> Simulator:
     item.temperature = 0.02
     item.drag = 5.0
     get_scene().frame_end = 400
+    return sim
+
+
+# ============================================================================
+# Carried cloth — particle-body attachments and contact outputs (VBD)
+# ============================================================================
+
+
+def _rigid_box(
+    name: str,
+    collection: bpy.types.Collection,
+    location: tuple[float, float, float],
+    size: tuple[float, float, float],
+) -> bpy.types.Object:
+    """A box mesh object in ``collection``, for use as a rigid body."""
+    obj = bpy.data.objects.get(name)
+    if obj is None:
+        mesh = bpy.data.meshes.new(name)
+        half = np.array(size) / 2
+        signs = np.array([(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)])
+        faces = [
+            (0, 1, 3, 2),
+            (4, 6, 7, 5),
+            (0, 4, 5, 1),
+            (2, 3, 7, 6),
+            (0, 2, 6, 4),
+            (1, 5, 7, 3),
+        ]
+        mesh.from_pydata((signs * half).tolist(), [], faces)
+        obj = bpy.data.objects.new(name, mesh)
+    for c in obj.users_collection:
+        c.objects.unlink(obj)
+    collection.objects.link(obj)
+    obj.animation_data_clear()
+    obj.location = location
+    return obj
+
+
+def carried_cloth(context: bpy.types.Context) -> Simulator:
+    """A sheet attached to an animated bar, dragged over a box (VBD).
+
+    The cloth's edge is held by ``attach`` (particle-body springs) rather than
+    pins, and its output is coloured by ``is_colliding``.
+    """
+    tree = hanging_cloth_tree("Warbler Carried Cloth", edge_attribute="attach")
+    source = _source_object("CarriedCloth", tree)
+    for name, value in (("Dim X", 32), ("Dim Y", 32), ("Height", 3.0)):
+        set_modifier_input(source, name, value)
+
+    scene = get_scene()
+    collection = bpy.data.collections.get("Warbler Rigid")
+    if collection is None:
+        collection = bpy.data.collections.new("Warbler Rigid")
+        scene.collection.children.link(collection)
+    # The cloth edge runs along x in [-3.2, 0] at y = 0. The bar sits just
+    # clear of it: attached particles inside the body would also collide with it.
+    bar = _rigid_box("Bar", collection, (-1.6, -0.15, 3.0), (3.4, 0.1, 0.1))
+    bar.keyframe_insert("location", frame=1)
+    bar.location = (-1.6, 4.4, 3.0)
+    bar.keyframe_insert("location", frame=180)
+    _rigid_box("Obstacle", collection, (-1.6, 2.5, 0.75), (1.5, 1.5, 1.5))
+
+    # The output is matched by name on compile, so the colour survives.
+    name = f"{source.name}_mesh"
+    output = bpy.data.objects.get(name)
+    if output is None:
+        output = bpy.data.objects.new(name, bpy.data.meshes.new(name))
+        scene.collection.objects.link(output)
+    output.data.materials.clear()  # ty: ignore[unresolved-attribute]
+    output.data.materials.append(  # ty: ignore[unresolved-attribute]
+        _attribute_material("Warbler Colliding", "is_colliding")
+    )
+
+    sim = _new_simulation(context, source)
+    _cloth_settings(sim.props)
+    sim.props.sim_rigid_collection = collection
+    scene.frame_end = 240
     return sim
 
 
@@ -526,6 +611,11 @@ DEMOS: dict[str, tuple[str, str, Callable[[bpy.types.Context], Simulator]]] = {
         "Hanging Ropes",
         "Curves as spring chains with animated pins (XPBD)",
         ropes,
+    ),
+    "CARRIED_CLOTH": (
+        "Carried Cloth",
+        "Cloth attached to an animated bar, coloured by contact (VBD)",
+        carried_cloth,
     ),
     "MEMBRANE_FUSION": (
         "Membrane Fusion",

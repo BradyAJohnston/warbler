@@ -15,6 +15,7 @@ PARTICLE_ATTRIBUTES = (
     "pinned",
     "on_surface",
     "surface_offset",
+    "attach",
 )
 
 

@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 # emitted by finalize() for models with free joints.
 newton.use_coord_layout_targets = True
 
+# A particle is colliding when within this fraction of its radius of a shape
+CONTACT_TOLERANCE = 0.1
+
 
 class SimulatorBase(ABC):
     @property
@@ -211,6 +214,10 @@ class Simulator(SimulatorBase):
         self._surface_offsets: list[np.ndarray] = []
         self._surface_mesh: wp.Mesh | None = None
         self._surface_indices: wp.array | None = None
+        # Particles with ``attach``, joined to their nearest rigid body
+        self._attach_ids: list[np.ndarray] = []
+        # Solver contact forces (VBD only), set up in finalize()
+        self._observables = None
 
     def _compile(self) -> None:
         self._free_model()
@@ -237,12 +244,16 @@ class Simulator(SimulatorBase):
             "_surface_vertex_normals",
             "_surface_offset",
             "_surface_normal",
+            "_particle_contact_f",
+            "_particle_colliding",
+            "_body_contact_f",
         ):
             if hasattr(self, name):
                 delattr(self, name)
         self._contact_ids = None
         self._surface_mesh = None
         self._surface_indices = None
+        self._observables = None
 
     def free(self) -> None:
         """Stop the simulation and release it, keeping the output objects.
@@ -268,6 +279,7 @@ class Simulator(SimulatorBase):
         self._surface_ids: list[np.ndarray] = []
         self._surface_offsets: list[np.ndarray] = []
         self._rigid_shapes = []
+        self._attach_ids = []
 
         self._add_rigid_bodies(self.objects)
         if self.props.use_ground_plane:
@@ -288,10 +300,20 @@ class Simulator(SimulatorBase):
         self.state_0: newton.State = self.model.state()
         self.state_1: newton.State = self.model.state()
 
+        self.collision_pipeline = newton.CollisionPipeline(self.model)
+        # DAT snapshots poses at the solver's own detection instants, so the
+        # solver runs collision itself and step() gets contacts=None.
+        self._solver_collides = self.props.solver == "VBD" and self.props.rigid_soft_dat
         if self.props.solver == "VBD":
             self.solver = newton.solvers.SolverVBD(
                 model=self.model,
                 iterations=self.props.iterations,
+                rigid_compliant_alm=True,
+                rigid_soft_contact_use_log_barrier=self.props.rigid_soft_log_barrier,
+                rigid_soft_enable_dat=self.props.rigid_soft_dat,
+                collision_pipeline=(
+                    self.collision_pipeline if self._solver_collides else None
+                ),
             )
         else:
             self.solver = newton.solvers.SolverXPBD(
@@ -299,10 +321,81 @@ class Simulator(SimulatorBase):
                 iterations=self.props.iterations,
             )
         self.control = self.model.control()
-        self.collision_pipeline = newton.CollisionPipeline(self.model)
-        self.contacts = self.collision_pipeline.contacts()
+        if self._solver_collides:
+            assert self.solver.contacts is not None
+            self.contacts: newton.Contacts = self.solver.contacts
+        else:
+            self.contacts = self.collision_pipeline.contacts()
         self._init_network_contacts()
         self._init_surface()
+        self._init_contact_outputs()
+
+    def _init_contact_outputs(self) -> None:
+        """Per-particle / per-body contact arrays, filled on each frame's last substep.
+
+        Only VBD reports particle-vs-shape contact forces (XPBD's ``contact_f``
+        covers body-body contacts only), so XPBD gets ``is_colliding`` alone.
+        """
+        device = self.model.device
+        self._particle_contact_f = wp.zeros(
+            self.model.particle_count, dtype=wp.vec3, device=device
+        )
+        self._particle_colliding = wp.zeros(
+            self.model.particle_count, dtype=wp.int32, device=device
+        )
+        self._body_contact_f = wp.zeros(
+            max(self.model.body_count, 1), dtype=wp.vec3, device=device
+        )
+        kind = self.solver.ObservableKind.CONTACT_F
+        if self.props.solver == "VBD" and kind in self.solver.supported_observables:
+            self._observables = self.solver.observables(
+                kinds={kind}, contacts=self.contacts
+            )
+
+    @property
+    def reports_contact_force(self) -> bool:
+        return self._observables is not None
+
+    def _gather_contacts(self) -> None:
+        """Mark colliding particles and sum contact forces from the last substep."""
+        if self.model.particle_count == 0:
+            return
+        self._particle_contact_f.zero_()
+        self._particle_colliding.zero_()
+        self._body_contact_f.zero_()
+        if self._observables is not None:
+            contact_f = self._observables.contact_f
+        else:
+            contact_f = wp.empty(0, dtype=wp.spatial_vector, device=self.model.device)
+        body_q = self.state_0.body_q
+        if body_q is None:
+            body_q = wp.empty(0, dtype=wp.transform, device=self.model.device)
+        c = self.contacts
+        wp.launch(
+            kernels.gather_soft_contacts,
+            dim=c.soft_contact_max,
+            inputs=[
+                c.soft_contact_count,
+                c.soft_contact_indices,
+                c.soft_contact_barycentric,
+                c.soft_contact_shape,
+                c.soft_contact_body_pos,
+                c.soft_contact_normal,
+                self.model.shape_body,
+                body_q,
+                self.state_0.particle_q,
+                self.model.particle_radius,
+                contact_f,
+                c.rigid_contact_max,
+                CONTACT_TOLERANCE,
+            ],
+            outputs=[
+                self._particle_contact_f,
+                self._particle_colliding,
+                self._body_contact_f,
+            ],
+            device=self.model.device,
+        )
 
     def _init_surface(self) -> None:
         """Upload the particles held on ``props.surface`` and build its mesh."""
@@ -444,6 +537,7 @@ class Simulator(SimulatorBase):
                 return
             on_surface = props.pop("on_surface", None)
             surface_offset = props.pop("surface_offset", None)
+            attach = props.pop("attach", None)
             part = SourcePart(
                 component=component,
                 start=self.builder.particle_count,
@@ -461,6 +555,10 @@ class Simulator(SimulatorBase):
                     self._add_edge_springs(part, attrs, props["position"])
             if "pinned" in props:
                 pinned.append(part.start + np.flatnonzero(props["pinned"]))
+            if attach is not None:
+                if "pinned" in props:
+                    attach = attach & ~props["pinned"]
+                self._attach_ids.append(part.start + np.flatnonzero(attach))
             if self.props.surface is not None:
                 if on_surface is None:
                     on_surface = ~props.get("pinned", np.zeros(part.count, bool))
@@ -477,12 +575,47 @@ class Simulator(SimulatorBase):
         add("curves", geo.curves, curve_sizes=geo.curves.curve_sizes)
         add("mesh", geo.mesh, faces=geo.mesh.faces)
 
+        self._add_attachments()
+
         if pinned:
             self._pinned_indices = np.concatenate(pinned)
             for i in self._pinned_indices:
                 # Zero mass AND non-ACTIVE so spring solves don't divide by zero
                 self.builder.particle_mass[i] = 0.0
                 self.builder.particle_flags[i] = 0
+
+    def _add_attachments(self) -> None:
+        """Join each ``attach`` particle to the nearest rigid body's surface.
+
+        The body-local anchor is the particle's starting position, so the
+        particle is carried along rigidly with the body. Only VBD solves
+        attachments.
+        """
+        ids = np.concatenate(self._attach_ids) if self._attach_ids else []
+        if len(ids) == 0 or not self.objects:
+            return
+        if self.props.solver != "VBD":
+            print(Warning("Warbler: `attach` needs the VBD solver; ignored"))
+            return
+        boxes = []
+        for obj in self.objects:
+            rig = rigid.RigidObject(obj)
+            inv = np.linalg.inv(np.array(obj.matrix_world.normalized()))
+            boxes.append((inv, rig.half_extents()))
+        position = np.array(self.builder.particle_q, dtype=float)[ids]
+        homogeneous = np.c_[position, np.ones(len(ids))]
+        local = np.stack([homogeneous @ inv.T for inv, _ in boxes])[..., :3]
+        half = np.stack([h for _, h in boxes])[:, None, :]
+        distance = np.linalg.norm(np.maximum(np.abs(local) - half, 0.0), axis=2)
+        nearest = distance.argmin(axis=0)
+        for k, (particle, body) in enumerate(zip(ids, nearest, strict=True)):
+            self.builder.add_attachment_particle_body(
+                int(particle),
+                int(body),
+                body_point=tuple(local[body, k]),
+                stiffness=self.props.attach_stiffness,
+                damping=self.props.attach_damping,
+            )
 
     def _add_particles(
         self,
@@ -634,10 +767,13 @@ class Simulator(SimulatorBase):
         if self.state_0.body_q is None:
             return
         rigid_transforms = self.state_0.body_q.numpy()
+        forces = self._body_contact_f.numpy() if self.reports_contact_force else None
         for i, obj in enumerate(self.objects):
             rig = rigid.RigidObject(obj)
             if rig.is_active:
                 rig.transform_from_wp(rigid_transforms[i])
+            if forces is not None:
+                rig.props.contact_force = forces[i]
 
     def _update_simulation_from_blender(self):
         """Copy manually-controlled body transforms from Blender to simulation."""
@@ -833,13 +969,22 @@ class Simulator(SimulatorBase):
             self._apply_rigid_scales((i + 1) / substeps)
             self.state_0.clear_forces()
             self._apply_thermostat(sim_dt)
-            self.collision_pipeline.collide(self.state_0, self.contacts)
+            last = i == substeps - 1
+            if not self._solver_collides:
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(
-                self.state_0, self.state_1, self.control, self.contacts, sim_dt
+                self.state_0,
+                self.state_1,
+                self.control,
+                None if self._solver_collides else self.contacts,
+                sim_dt,
+                # forces are only read back once a frame
+                observables=self._observables if last else None,
             )
             self.state_0, self.state_1 = self.state_1, self.state_0
             self._project_to_surface()
             self._update_network_contacts()
+        self._gather_contacts()
 
     # def _get_manual_body_transforms(self) -> dict[int, np.ndarray]:
     #     """Get transforms of manually-controlled bodies before physics solve."""
@@ -976,6 +1121,8 @@ class Simulator(SimulatorBase):
         positions = self.particle_positions
         velocity = self.velocity
         broken = self.broken_springs if self._contact_ids is not None else None
+        colliding = self._particle_colliding.numpy().astype(bool)
+        force = self._particle_contact_f.numpy() if self.reports_contact_force else None
         normal = None
         if self._surface_mesh is not None and self._surface_indices is not None:
             normal = np.zeros((self.model.particle_count, 3), dtype=np.float32)
@@ -989,6 +1136,11 @@ class Simulator(SimulatorBase):
                 part.output.store_named_attribute(
                     normal[part.indices], "surface_normal"
                 )
+            part.output.store_named_attribute(
+                colliding[part.indices], "is_colliding", atype="BOOLEAN"
+            )
+            if force is not None:
+                part.output.store_named_attribute(force[part.indices], "contact_force")
             if part.edges is not None and len(part.edges) and not part.is_cloth:
                 self._update_edge_outputs(part, positions, broken)
 

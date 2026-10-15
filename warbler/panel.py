@@ -14,7 +14,16 @@ from .ops import (
 from .props import WarblerObjectProperties, WarblerSceneProperties
 
 # Attributes warbler knows how to map into a simulation
-_KNOWN_PARTICLE_ATTRS = {"position", "velocity", "mass", "radius", "pinned"}
+_KNOWN_PARTICLE_ATTRS = {
+    "position",
+    "velocity",
+    "mass",
+    "radius",
+    "pinned",
+    "on_surface",
+    "surface_offset",
+    "attach",
+}
 
 DOMAIN_SHORT = {
     "POINT": "pt",
@@ -252,12 +261,20 @@ class WB_PT_WarblerPanel(Panel):
             col.prop(item, "soft_contact_ke")
             col.prop(item, "soft_contact_kd")
             col.prop(item, "soft_contact_mu")
+            sub = col.column()
+            sub.active = item.solver == "VBD"
+            sub.prop(item, "rigid_soft_log_barrier")
+            sub.prop(item, "rigid_soft_dat")
 
         header, panel = create_panel(layout, idname="rigid_bodies")
         header.label(text="Rigid Bodies")
         if panel:
             col = panel.column()
             col.prop(item, "sim_rigid_collection")
+            sub = col.column()
+            sub.active = item.solver == "VBD"
+            sub.prop(item, "attach_stiffness")
+            sub.prop(item, "attach_damping")
 
 
 def move_above_physics_panels() -> None:

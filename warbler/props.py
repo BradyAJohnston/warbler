@@ -234,6 +234,28 @@ class SimulationListItem(bpy.types.PropertyGroup):
         description="Friction coefficient for particle soft contacts",
         default=0.5,
     )
+    rigid_soft_log_barrier: BoolProperty(  # type: ignore
+        name="Log Barrier Contacts",
+        description="VBD: particle vs rigid-shape contacts use a C2 log barrier instead of a quadratic penalty",
+        default=False,
+    )
+    rigid_soft_dat: BoolProperty(  # type: ignore
+        name="Truncate Rigid Motion",
+        description="VBD: Divide-and-Truncate rigid and cloth updates against their contacts so they can't pass through each other",
+        default=False,
+    )
+    attach_stiffness: FloatProperty(  # type: ignore
+        name="Attach Stiffness",
+        description="VBD: stiffness of the springs holding `attach` particles to their nearest rigid body",
+        default=1e4,
+        min=0.0,
+    )
+    attach_damping: FloatProperty(  # type: ignore
+        name="Attach Damping",
+        description="VBD: damping of the attachment springs",
+        default=0.0,
+        min=0.0,
+    )
     rigid_decay_frames: IntProperty(  # type: ignore
         name="Rigid Input Smoothing",
         description="Number of frames to move the inputs of the rigid body over",
@@ -285,6 +307,12 @@ class WarblerObjectProperties(PropertyGroup):
         default="",
     )
     mass: FloatProperty(name="Mass", description="Mass of the rigid body", default=1e2)  # type: ignore
+    contact_force: FloatVectorProperty(  # type: ignore
+        name="Contact Force",
+        description="Total force on the body from simulated particles last frame (VBD only)",
+        default=(0.0, 0.0, 0.0),
+        subtype="XYZ",
+    )
     sim_body_index: IntProperty(  # type: ignore
         name="Rigid Body Index",
         description="Index of the rigid body in the simulation",

@@ -1397,13 +1397,13 @@ wheels = [
 
 [[package]]
 name = "newton"
-version = "1.6.1"
+version = "1.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "warp-lang" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0b/53/fff564a78d53da69821cf75ccd6fecde0c218380671cd117628c5fdd957f/newton-1.6.1-py3-none-any.whl", hash = "sha256:0dbabb85228eeac9f2750347a3f4ce502ad41a9bf19d43f55c6c8e4458b7e318", size = 6194171, upload-time = "2026-10-05T22:18:10.567Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/02/6b7dfd9310ddd013650b12171271cf97551e10008fd1e26d2f1697d62407/newton-1.7.0-py3-none-any.whl", hash = "sha256:a58b5ca4550a81d04bb9607c300318a0f87edddd4632fe58765224ee1fd18b05", size = 6552044, upload-time = "2026-10-14T22:37:28.631Z" },
 ]
 
 [[package]]
@@ -2383,7 +2383,7 @@ requires-dist = [
     { name = "databpy", specifier = ">=0.10.1" },
     { name = "fake-bpy-module", marker = "extra == 'dev'", specifier = ">=20260501" },
     { name = "molecularnodes", marker = "extra == 'dev'", git = "https://github.com/BradyAJohnston/MolecularNodes?rev=9059f03ad30778be0abdfc5b1afa641f40d7ce52" },
-    { name = "newton", specifier = ">=1.6.0" },
+    { name = "newton", specifier = ">=1.7.0" },
     { name = "nodebpy", specifier = ">=520.38.0" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },

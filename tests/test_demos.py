@@ -89,6 +89,69 @@ def test_hanging_cloth():
     assert q[:, 2].min() < 2.0
 
 
+def test_particles_report_collisions():
+    """Settled particles touching the ground are flagged ``is_colliding``."""
+    sim = demos.particles(bpy.context)
+    source = sim.props.source
+    assert source is not None
+    for name, value in (("Dim X", 5), ("Dim Y", 5), ("Dim Z", 3)):
+        demos.set_modifier_input(source, name, value)
+    q = _run(sim, 120)
+    out = sim.parts[0].output
+    assert out is not None
+    colliding = out.named_attribute("is_colliding")
+    z = q[:, 2]
+    assert colliding[z < z.min() + 0.01].all()
+    assert not colliding[z > 0.06].any()
+    # XPBD doesn't report particle contact forces
+    assert "contact_force" not in out.object.data.attributes  # ty: ignore[unresolved-attribute]
+
+
+def test_carried_cloth_attachment_and_contact_forces():
+    """``attach`` holds the cloth edge to an animated bar (VBD); the cloth
+    lands on the obstacle, which reports the contact force."""
+    sim = demos.carried_cloth(bpy.context)
+    get_scene().frame_set(1)
+    sim.compile()
+    edge = sim.particle_positions[:, 1] < 0.01
+    assert sim.model.attachment_particle_body_count == edge.sum() == 33
+    q0 = sim.particle_positions.copy()
+
+    q = _run(sim, 80)
+    bar = bpy.data.objects["Bar"]
+    moved = np.array(bar.matrix_world.translation) - (-1.6, -0.15, 3.0)
+    np.testing.assert_allclose((q[edge] - q0[edge]).mean(0), moved, atol=0.05)
+
+    out = sim.parts[0].output
+    assert out is not None
+    colliding = out.named_attribute("is_colliding")
+    force = out.named_attribute("contact_force")
+    assert colliding.sum() > 50
+    assert force[colliding][:, 2].sum() > 0
+    assert not force[~colliding].any()
+    # The obstacle carries part of the cloth's weight
+    weight = 9.81 * sim.model.particle_mass.numpy().sum()  # ty: ignore[unresolved-attribute]
+    fz = bpy.data.objects["Obstacle"].wb.contact_force[2]  # ty: ignore[unresolved-attribute]
+    assert -weight < fz < -0.2 * weight
+
+
+@pytest.mark.parametrize(
+    ("log_barrier", "dat"), [(True, False), (False, True)], ids=["log_barrier", "dat"]
+)
+def test_vbd_rigid_soft_contact_options(log_barrier, dat):
+    """Newton 1.7's opt-in VBD rigid-soft contact modes run (DAT makes the
+    solver own the collision pipeline)."""
+    sim = demos.carried_cloth(bpy.context)
+    sim.props.rigid_soft_log_barrier = log_barrier
+    sim.props.rigid_soft_dat = dat
+    q = _run(sim, 60)
+    assert sim._solver_collides == dat
+    assert q[:, 2].min() > 0.5, "cloth stays on the obstacle"
+    out = sim.parts[0].output
+    assert out is not None
+    assert out.named_attribute("is_colliding").sum() > 50
+
+
 def test_hanging_ropes_follow_animated_pins():
     """Pinned curve roots are re-read from GN each frame and drag the ropes."""
     sim = demos.ropes(bpy.context)
