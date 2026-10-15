@@ -2,22 +2,29 @@
   {
     "objectID": "index.html",
     "href": "index.html",
-    "title": "warbler",
+    "title": "Warbler",
     "section": "",
-    "text": "An add-on to bring interactive GPU simuilations via NVIDIA’s warp to Blender’s viewport."
-  },
-  {
-    "objectID": "index.html#usage",
-    "href": "index.html#usage",
-    "title": "warbler",
-    "section": "Usage",
-    "text": "Usage\nCurrently only adds the operator Start Simulation (accessible through the F3 menu) to create a cube of particles that then simulate and interact with the default cube being moved around the scene as below.\nVideo"
+    "text": "A Blender add-on for interactive GPU simulations in the viewport, powered by NVIDIA’s Newton physics engine and Warp.\nBuild the simulation’s geometry with Geometry Nodes — particles, ropes and strands (curves), cloth (meshes) and rigid bodies (instances) — then compile it and scrub the timeline: it simulates live as frames change, and you can move objects around while it runs."
   },
   {
     "objectID": "index.html#installation",
     "href": "index.html#installation",
-    "title": "warbler",
+    "title": "Warbler",
     "section": "Installation",
-    "text": "Installation\nClone the add-on, then run the build script through Blender or a compatible python that is 3.11. This will create a warbler_X.X.X.zip that can be installed through Blender’s regular add-on installation.\ngit clone git@github.com:BradyAJohnston/warbler.git\ncd warbler\nblender -b -P build.py"
+    "text": "Installation\nWarbler needs Blender 5.2 or newer. Simulations run fastest on an NVIDIA GPU (CUDA); other machines, including Apple Silicon Macs, fall back to the much slower CPU device.\n\nDrag and drop (recommended)\nDrag the button for your platform from this page into a Blender window:\n  \nBlender asks to allow online access, then to add the repository, then installs the add-on. Every new release then shows up as an update under Edit → Preferences → Get Extensions (enable Check for Updates on Startup on the repository to be told automatically).\n\n\nAdd the repository by hand\nEdit → Preferences → Get Extensions → Repositories, click + → Add Remote Repository, paste this URL, then install Warbler from Get Extensions:\nhttps://github.com/BradyAJohnston/warbler/releases/latest/download/index.json\nWarbler is also listed in BradyAJohnston/extensions (https://bradyajohnston.github.io/extensions/index.json) alongside other add-ons; subscribe to one repository or the other, not both.\n\n\nInstall a release manually\nClick a button above (or pick the .zip from the latest release) to download it, then drag the file into Blender or use Get Extensions → ⌄ → Install from Disk. Installed this way it doesn’t update."
+  },
+  {
+    "objectID": "index.html#getting-started",
+    "href": "index.html#getting-started",
+    "title": "Warbler",
+    "section": "Getting started",
+    "text": "Getting started\nOpen the Warbler tab in the 3D viewport’s sidebar (N) and pick one of the demos from Add Demo — falling monkeys, hanging cloth, ropes, a molecular crowd, nucleosomes, and more. Each builds its geometry in a Geometry Nodes tree you can edit, then press Compile and play the timeline.\nThe node groups used to set up simulations (Set Particles, Set Collider, Set Binding Sites, …) are available under Add → Warbler in the Geometry Nodes editor and in the Asset Browser."
+  },
+  {
+    "objectID": "index.html#development",
+    "href": "index.html#development",
+    "title": "Warbler",
+    "section": "Development",
+    "text": "Development\nDevelopment uses uv and extbpy:\ngit clone https://github.com/BradyAJohnston/warbler.git\ncd warbler\nuv sync --all-extras\nuv run nodebpy build   # build the node-group asset library (warbler/assets/nodes.blend)\nuvx extbpy sync        # write blender_manifest.toml + wheels into warbler/ to load it from source\nuvx extbpy build       # build the per-platform .zip files\nRun the tests with uv run pytest tests/.\nTo build the zips and check them with Blender’s extension validate the way CI does, point extbpy at a Blender 5.2 executable (without one the check is skipped):\nuvx extbpy build --blender /path/to/blender\nCI builds and validates the zips on every push and pull request; download them from the run’s artifacts to test a commit before release.\n\nReleasing\nPush a version tag:\ngit tag v0.0.10\ngit push origin v0.0.10\nThe release workflow sets the version from the tag, builds the node assets and the per-platform zips, and publishes them as a GitHub release. It also uploads an index.json, which makes releases/latest/download/ an extension repository, so subscribers get the update straight away; the zips have no version in their names so the drag-and-drop links always point at the newest build. The extensions site picks it up at its next daily rebuild (drafts and pre-releases are skipped)."
   }
 ]
