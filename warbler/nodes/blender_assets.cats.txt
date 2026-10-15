@@ -11,3 +11,4 @@ ba19136a-743e-4b12-acd6-6f4da209c863:Warbler/Particles:Warbler-Particles
 e169a26f-7114-4f10-a7cb-559a01c4a7be:Warbler/Rigid Bodies:Warbler-Rigid Bodies
 1d6063ad-2abb-4cca-9bb6-26d4a371d155:Warbler/Generators:Warbler-Generators
 54890066-5295-4dce-b842-0370f7024048:Warbler/Outputs:Warbler-Outputs
+7b42a9d6-706e-463d-aea2-e0c91fbe1f8d:Warbler/Interactions:Warbler-Interactions

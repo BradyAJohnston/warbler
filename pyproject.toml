@@ -1,6 +1,6 @@
 [project]
 name = "warbler"
-version = "0.0.11"
+version = "0.0.10"
 description = "Interactive GPU simulations in Blender's viewport"
 authors = [
     {name = "Brady Johnston", email = "brady.johnston@me.com"},

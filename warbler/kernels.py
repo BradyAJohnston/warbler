@@ -91,6 +91,161 @@ def langevin_body_forces(
     body_f[tid] = body_f[tid] + wp.spatial_vector(f, tau)  # ty: ignore[invalid-assignment]
 
 
+@wp.func
+def _well(d: wp.vec3, strength: float, depth: float, width: float) -> wp.vec3:
+    """Force on the end of ``d`` (= x - site) from a Gaussian well
+    ``U = -strength·depth·exp(-r²/2w²)`` at the site: toward it, 0 beyond 3w."""
+    r2 = wp.dot(d, d)
+    if r2 > 9.0 * width * width:
+        return wp.vec3(0.0)
+    inv_w2 = 1.0 / (width * width)
+    return -(strength * depth * wp.exp(-0.5 * r2 * inv_w2) * inv_w2) * d
+
+
+@wp.kernel
+def binding_forces(
+    particle_q: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    particle_type: wp.array[wp.int32],
+    particle_affinity: wp.array[float],
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    site_bodies: wp.array[wp.int32],
+    body_site_start: wp.array[wp.int32],
+    body_site_end: wp.array[wp.int32],
+    body_reach: wp.array[float],
+    site_local: wp.array[wp.vec3],
+    site_normal: wp.array[wp.vec3],
+    site_type: wp.array[wp.int32],
+    site_strength: wp.array[float],
+    pair_depth: wp.array2d[float],
+    pair_width: wp.array2d[float],
+    max_width: wp.array[float],
+    particle_f: wp.array[wp.vec3],
+    body_f: wp.array[wp.spatial_vector],  # ty: ignore[invalid-type-form]
+    particle_bound: wp.array[wp.int32],
+):
+    """Attraction between typed particles and typed binding sites on bodies.
+
+    Sites lie on the body's collision surface (``collider_surface``), and each
+    particle's well is centred one particle radius out along the site normal,
+    where the particle rests against the surface: bound particles sit in the
+    well instead of being pressed into the collider.
+
+    The pair table (``pair_depth`` / ``pair_width``, indexed by the two
+    interaction types) gives each site a Gaussian well for each particle type
+    (see ``_well``), scaled by the site's strength and the particle's
+    affinity; a depth of 0 means the pair doesn't interact. The body gets the
+    opposite force at the site, a wrench about its centre of mass. Bodies are
+    skipped when the particle is beyond their sites' reach plus the widest
+    well. ``particle_bound`` marks particles within 2 widths of a site they
+    interact with.
+    """
+    tid = wp.tid()
+    a = particle_type[tid]
+    if a <= 0:
+        return
+    affinity = particle_affinity[tid]
+    x = particle_q[tid]
+    radius = particle_radius[tid]
+    reach = 3.0 * max_width[0] + radius
+    f_particle = wp.vec3(0.0)
+    bound = wp.int32(0)  # dynamic: a literal 0 is constant in a Warp loop
+    for k in range(site_bodies.shape[0]):
+        b = site_bodies[k]
+        xform = body_q[b]
+        origin = wp.transform_get_translation(xform)
+        if wp.length(x - origin) > body_reach[k] + reach:
+            continue
+        com = wp.transform_point(xform, body_com[b])
+        f_body = wp.vec3(0.0)
+        tau_body = wp.vec3(0.0)
+        for s in range(body_site_start[k], body_site_end[k]):
+            depth = pair_depth[site_type[s], a]  # ty: ignore[not-subscriptable]
+            if depth <= 0.0:
+                continue
+            width = pair_width[site_type[s], a]  # ty: ignore[not-subscriptable]
+            rest = site_local[s] + radius * site_normal[s]
+            site = wp.transform_point(xform, rest)
+            d = x - site
+            if wp.dot(d, d) < 4.0 * width * width:
+                bound = wp.int32(1)
+            f = _well(d, affinity * site_strength[s], depth, width)
+            f_particle += f
+            f_body -= f
+            tau_body -= wp.cross(site - com, f)  # ty: ignore[unsupported-operator]
+        if wp.length(f_body) > 0.0:
+            wp.atomic_add(body_f, b, wp.spatial_vector(f_body, tau_body))  # ty: ignore[invalid-argument-type]
+    particle_f[tid] = particle_f[tid] + f_particle  # ty: ignore[invalid-assignment]
+    particle_bound[tid] = bound  # ty: ignore[invalid-assignment]
+
+
+@wp.kernel
+def site_site_forces(
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    site_bodies: wp.array[wp.int32],
+    body_site_start: wp.array[wp.int32],
+    body_site_end: wp.array[wp.int32],
+    body_reach: wp.array[float],
+    site_local: wp.array[wp.vec3],
+    site_type: wp.array[wp.int32],
+    site_strength: wp.array[float],
+    pair_depth: wp.array2d[float],
+    pair_width: wp.array2d[float],
+    max_width: wp.array[float],
+    body_f: wp.array[wp.spatial_vector],  # ty: ignore[invalid-type-form]
+    body_partners: wp.array[wp.int32],
+):
+    """Attraction between the binding sites of two bodies (e.g. protein
+    interfaces), from the same pair table as ``binding_forces``.
+
+    One thread per pair of bodies with sites (a 2D launch; the lower triangle
+    returns at once); pairs beyond their reaches plus the widest well are
+    skipped. Each site pair is a Gaussian well, scaled by both strengths,
+    pulling the sites together: equal and opposite wrenches on the bodies.
+    ``body_partners`` counts, per body, the bodies it is bound to (a site
+    pair within 2 widths).
+    """
+    i, j = wp.tid()  # ty: ignore[invalid-assignment, not-iterable]
+    if j <= i:
+        return
+    b1 = site_bodies[i]
+    b2 = site_bodies[j]
+    x1 = body_q[b1]
+    x2 = body_q[b2]
+    gap = wp.length(wp.transform_get_translation(x1) - wp.transform_get_translation(x2))  # ty: ignore[unsupported-operator]
+    if gap > body_reach[i] + body_reach[j] + 3.0 * max_width[0]:
+        return
+    com1 = wp.transform_point(x1, body_com[b1])
+    com2 = wp.transform_point(x2, body_com[b2])
+    f1 = wp.vec3(0.0)
+    tau1 = wp.vec3(0.0)
+    tau2 = wp.vec3(0.0)
+    bound = wp.int32(0)  # dynamic: a literal 0 is constant in a Warp loop
+    for s1 in range(body_site_start[i], body_site_end[i]):
+        p1 = wp.transform_point(x1, site_local[s1])
+        for s2 in range(body_site_start[j], body_site_end[j]):
+            depth = pair_depth[site_type[s1], site_type[s2]]  # ty: ignore[not-subscriptable]
+            if depth <= 0.0:
+                continue
+            width = pair_width[site_type[s1], site_type[s2]]  # ty: ignore[not-subscriptable]
+            p2 = wp.transform_point(x2, site_local[s2])
+            d = p1 - p2  # ty: ignore[unsupported-operator]
+            if wp.dot(d, d) < 4.0 * width * width:
+                bound = wp.int32(1)
+            f = _well(d, site_strength[s1] * site_strength[s2], depth, width)
+            f1 += f
+            tau1 += wp.cross(p1 - com1, f)  # ty: ignore[unsupported-operator]
+            tau2 -= wp.cross(p2 - com2, f)  # ty: ignore[unsupported-operator]
+    if wp.length(f1) > 0.0:
+        wp.atomic_add(body_f, b1, wp.spatial_vector(f1, tau1))  # ty: ignore[invalid-argument-type]
+        wp.atomic_add(body_f, b2, wp.spatial_vector(-f1, tau2))  # ty: ignore[invalid-argument-type]
+    if bound:
+        wp.atomic_add(body_partners, b1, 1)  # ty: ignore[invalid-argument-type]
+        wp.atomic_add(body_partners, b2, 1)  # ty: ignore[invalid-argument-type]
+
+
 @wp.kernel
 def advance_seed(seed: wp.array[wp.int32], count: int):
     seed[0] = seed[0] + count  # ty: ignore[invalid-assignment]

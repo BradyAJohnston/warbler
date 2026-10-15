@@ -16,3 +16,6 @@ warbler/assets/nodes.blend
 warbler/assets/nodes.blend.stamp
 warbler/assets/blender_assets.cats.txt
 *.blend1
+/dist/
+/artifact/
+/repo/

@@ -1,7 +1,7 @@
 import time
 from abc import ABC
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 from uuid import uuid1
 
 import bpy
@@ -14,7 +14,12 @@ from mathutils import Matrix
 from nodebpy import geometry as g
 
 from . import kernels, rigid
-from .geometryset import GeometryAttributes, GeometrySet, InstanceAttributes
+from .geometryset import (
+    GeometryAttributes,
+    GeometrySet,
+    InstanceAttributes,
+    ReferenceMesh,
+)
 from .nodes import geometry as nodes
 from .props import SimulationListItem
 from .utils import (
@@ -147,6 +152,89 @@ class SourcePart:
         return "POINTCLOUD"
 
 
+class BodySites(NamedTuple):
+    """The binding sites of one body: body-local positions on its collision
+    surface, outward normals there, interaction types and strengths."""
+
+    body: int
+    local: np.ndarray
+    normal: np.ndarray
+    types: np.ndarray
+    strengths: np.ndarray
+
+
+def collider_surface(
+    kind: str,
+    geometry: ReferenceMesh,
+    scale: np.ndarray,
+    sites: np.ndarray,
+    hull: newton.Mesh | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Body-local position on the collision shape, and its outward normal, of
+    each binding site (``sites``: mask of the mesh's vertices).
+
+    Wells must sit where a bound partner can rest: a site buried under the
+    collider (a dimple under a convex hull, a vertex inside a fitted box)
+    would pull its partner into the surface for good, and Newton's contacts
+    don't conserve angular momentum under a sustained push (the world-space
+    normal lags the rotating contact point), which spins the body up. So
+    sites are moved onto the shape the body collides with: the nearest hull
+    facet, box face, sphere or capsule surface; mesh colliders keep the vertex
+    and its normal.
+    """
+    vertices = geometry.vertices * scale
+    points = vertices[sites]
+    lo, hi = vertices.min(axis=0), vertices.max(axis=0)
+    centre = (lo + hi) / 2
+    half = np.maximum((hi - lo) / 2, 1e-4)
+    if kind == "MESH" or (kind == "CONVEX_HULL" and hull is None):
+        normals = geometry.normals
+        if normals is None:
+            normals = points - centre
+        else:
+            normals = normals[sites] / np.where(scale == 0, 1, scale)
+        return points, _unit(normals)
+    if kind == "CONVEX_HULL":
+        assert hull is not None
+        corners = np.asarray(hull.vertices) * scale
+        tris = corners[np.asarray(hull.indices).reshape(-1, 3)]
+        normals = _unit(np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0]))
+        inward = np.einsum("fi,fi->f", normals, tris.mean(axis=1) - corners.mean(0))
+        normals[inward < 0] *= -1
+        offsets = -np.einsum("fi,fi->f", normals, tris[:, 0])
+        # Signed distance to every facet plane; the nearest facet is the max
+        distance = points @ normals.T + offsets
+        nearest = distance.argmax(axis=1)
+        n = normals[nearest]
+        return points - distance[np.arange(len(points)), nearest, None] * n, n
+    if kind == "SPHERE":
+        direction = _unit(points - centre)
+        return centre + direction * half.max(), direction
+    if kind == "CAPSULE":
+        axis = int(half.argmax())
+        radius = float(np.delete(half, axis).max())
+        h = max(float(half[axis]) - radius, 0.0)
+        core = np.repeat(centre[None], len(points), axis=0)
+        core[:, axis] += np.clip(points[:, axis] - centre[axis], -h, h)
+        direction = _unit(points - core)
+        return core + direction * radius, direction
+    # BOX: onto the nearest face
+    q = points - centre
+    depth = half - np.abs(q)
+    face = depth.argmin(axis=1)
+    rows = np.arange(len(points))
+    sign = np.where(q[rows, face] >= 0, 1.0, -1.0)
+    q[rows, face] = sign * half[face]
+    normals = np.zeros_like(q)
+    normals[rows, face] = sign
+    return centre + q, normals
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    length = np.linalg.norm(v, axis=-1, keepdims=True)
+    return v / np.where(length == 0, 1, length)
+
+
 @dataclass
 class InstancePart:
     """The source's instances, each simulated as one rigid body.
@@ -164,6 +252,27 @@ class InstancePart:
     @property
     def simulated(self) -> np.ndarray:
         return self.body >= 0
+
+
+def _interaction_types(
+    types: np.ndarray | None, strengths: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Interaction type and strength of each element, from a ``*_type`` and a
+    strength attribute (``affinity`` / ``binding``): either may be missing —
+    a strength alone means type 1, a type alone strength 1. Elements of type 0
+    or strength ≤ 0 don't interact (type 0)."""
+    given = types if types is not None else strengths
+    if given is None:
+        return None
+    n = len(given)
+    if strengths is None:
+        strengths = np.ones(n, dtype=np.float32)
+    if types is None:
+        types = np.ones(n, dtype=np.int32)
+    types = np.where(strengths > 0, types, 0).astype(np.int32)
+    if not (types > 0).any():
+        return None
+    return types, strengths.astype(np.float32)
 
 
 def quat_matrices(q: np.ndarray) -> np.ndarray:
@@ -257,6 +366,14 @@ class Simulator(SimulatorBase):
         self._surface_indices: wp.array | None = None
         # Particles with ``attach``, joined to their nearest rigid body
         self._attach_ids: list[np.ndarray] = []
+        # Interactions: (particle indices, types, affinities) per part, and
+        # (body, body-local positions, types, strengths) per instance with
+        # binding sites; whether the source carries an interaction table
+        self._affinity: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        self._sites: list[BodySites] = []
+        self._binding: dict[str, wp.array] | None = None
+        self._has_table = False
+        self._site_pairs = False
         # Solver contact forces (VBD only), set up in finalize()
         self._observables = None
 
@@ -296,6 +413,8 @@ class Simulator(SimulatorBase):
             "_scale_shapes",
             "_scale_start",
             "_scale_target",
+            "_particle_bound",
+            "_body_partners",
         ):
             if hasattr(self, name):
                 delattr(self, name)
@@ -303,6 +422,7 @@ class Simulator(SimulatorBase):
         self._surface_mesh = None
         self._surface_indices = None
         self._observables = None
+        self._binding = None
         self._graph = None
         self._graph_key = None
         self._graph_warm = False
@@ -333,6 +453,9 @@ class Simulator(SimulatorBase):
         self._surface_offsets: list[np.ndarray] = []
         self._rigid_shapes = []
         self._attach_ids = []
+        self._affinity = []
+        self._sites = []
+        self._has_table = False
 
         self._add_rigid_bodies(self.objects)
         if self.props.use_ground_plane:
@@ -342,6 +465,7 @@ class Simulator(SimulatorBase):
             geo = GeometrySet(self.props.source)
             self._add_source(geo)
             self._add_instances(geo.instances)
+            self._has_table = bool(geo.interactions)
 
     def finalize(self):
         if self.props.solver == "VBD":
@@ -388,6 +512,7 @@ class Simulator(SimulatorBase):
         self._init_surface()
         self._init_contact_outputs()
         self._init_device_inputs()
+        self._init_binding()
 
     def _init_device_inputs(self) -> None:
         """Device-side copies of per-substep inputs, so the substep loop has no
@@ -650,27 +775,40 @@ class Simulator(SimulatorBase):
                 if 0 <= collider[i] < len(COLLIDERS)
                 else COLLIDERS[0]
             )
-            self._add_collider(
+            kind = self._add_collider(
                 int(body[i]), kind, geom, np.array(size), cfg, meshes, int(reference[i])
             )
+            found = _interaction_types(geom.binding_type, geom.binding)
+            if found is not None:
+                types, strengths = found
+                sites = types > 0
+                hull = meshes.get((int(reference[i]), "CONVEX_HULL"))
+                local, normal = collider_surface(
+                    kind, geom, np.array(size), sites, hull
+                )
+                self._sites.append(
+                    BodySites(
+                        int(body[i]), local, normal, types[sites], strengths[sites]
+                    )
+                )
         self.instances = InstancePart(body=body, world=world, scale=scale)
 
     def _add_collider(
         self,
         body: int,
         kind: str,
-        geometry: tuple[np.ndarray, np.ndarray],
+        geometry: ReferenceMesh,
         scale: np.ndarray,
         cfg: newton.ModelBuilder.ShapeConfig,
         meshes: dict[tuple[int, str], newton.Mesh],
         reference: int,
-    ) -> None:
+    ) -> str:
         """Give ``body`` a collision shape of ``kind`` fitted to ``geometry``.
 
         Primitives fit the reference's scaled bounding box; hull and mesh
         shapes share one ``newton.Mesh`` per reference, scaled per shape.
         """
-        vertices, triangles = geometry
+        vertices, triangles = geometry.vertices, geometry.triangles
         if kind in ("CONVEX_HULL", "MESH") and len(triangles) == 0:
             kind = "BOX"  # nothing to build a mesh from
         lo, hi = vertices.min(axis=0), vertices.max(axis=0)
@@ -716,6 +854,7 @@ class Simulator(SimulatorBase):
                 else self.builder.add_shape_mesh
             )
             add(body, mesh=meshes[key], scale=wp.vec3(*scale), cfg=cfg)
+        return kind
 
     # ============================================================================
     # Source geometry → particles, springs and cloth
@@ -745,6 +884,9 @@ class Simulator(SimulatorBase):
             on_surface = props.pop("on_surface", None)
             surface_offset = props.pop("surface_offset", None)
             attach = props.pop("attach", None)
+            interacting = _interaction_types(
+                props.pop("affinity_type", None), props.pop("affinity", None)
+            )
             part = SourcePart(
                 component=component,
                 start=self.builder.particle_count,
@@ -762,6 +904,12 @@ class Simulator(SimulatorBase):
                     self._add_edge_springs(part, attrs, props["position"])
             if "pinned" in props:
                 pinned.append(part.start + np.flatnonzero(props["pinned"]))
+            if interacting is not None:
+                types, affinity = interacting
+                local = np.flatnonzero(types > 0)
+                self._affinity.append(
+                    (part.start + local, types[local], affinity[local])
+                )
             if attach is not None:
                 if "pinned" in props:
                     attach = attach & ~props["pinned"]
@@ -917,6 +1065,12 @@ class Simulator(SimulatorBase):
             if bend_ke > 0.0:
                 for i in range(first, end - 2):
                     self.builder.add_spring(i, i + 2, bend_ke, kd, 0.0)
+                    if self.props.bend_rest_straight:
+                        # The two segments end to end, not the starting chord
+                        q = np.asarray(self.builder.particle_q[i : i + 3])
+                        self.builder.spring_rest_length[-1] = float(
+                            np.linalg.norm(np.diff(q, axis=0), axis=1).sum()
+                        )
 
     def _add_cloth(
         self,
@@ -1135,6 +1289,189 @@ class Simulator(SimulatorBase):
             broken[self._contact_ids.numpy()] = self._contact_broken.numpy() == 1
         return broken
 
+    def _init_binding(self) -> None:
+        """Device arrays for interactions: typed particles ↔ typed binding
+        sites, and site ↔ site between bodies.
+
+        Sites are grouped by body, each body with the reach of its furthest
+        site so far-away bodies are skipped. The pair table is sized by the
+        largest type in use and filled every frame (``_update_interactions``).
+        """
+        device = self.model.device
+        self._particle_bound = wp.zeros(
+            max(self.model.particle_count, 1), dtype=wp.int32, device=device
+        )
+        self._body_partners = wp.zeros(
+            max(self.model.body_count, 1), dtype=wp.int32, device=device
+        )
+        if not self._sites or (not self._affinity and len(self._sites) < 2):
+            return
+        particle_type = np.zeros(self.model.particle_count, dtype=np.int32)
+        affinity = np.zeros(self.model.particle_count, dtype=np.float32)
+        for ids, types, values in self._affinity:
+            particle_type[ids] = types
+            affinity[ids] = values
+        site_type = np.concatenate([b.types for b in self._sites])
+        ends = np.cumsum([len(b.local) for b in self._sites])
+        count = int(max(site_type.max(), particle_type.max(initial=0))) + 1
+        if self._has_table:
+            table = GeometrySet(self.props.source).interactions  # type: ignore[arg-type]
+            for key in ("interaction_a", "interaction_b"):
+                count = max(count, int(table.get(key, np.zeros(1)).max()) + 1)
+        self._binding = {
+            "particle_type": wp.array(particle_type, dtype=wp.int32, device=device),
+            "affinity": wp.array(affinity, dtype=float, device=device),
+            "bodies": wp.array(
+                [b.body for b in self._sites], dtype=wp.int32, device=device
+            ),
+            "start": wp.array(
+                np.concatenate([[0], ends[:-1]]), dtype=wp.int32, device=device
+            ),
+            "end": wp.array(ends, dtype=wp.int32, device=device),
+            "reach": wp.array(
+                [np.linalg.norm(b.local, axis=1).max() for b in self._sites],
+                dtype=float,
+                device=device,
+            ),
+            "local": wp.array(
+                np.concatenate([b.local for b in self._sites]),
+                dtype=wp.vec3,
+                device=device,
+            ),
+            "normal": wp.array(
+                np.concatenate([b.normal for b in self._sites]),
+                dtype=wp.vec3,
+                device=device,
+            ),
+            "site_type": wp.array(site_type, dtype=wp.int32, device=device),
+            "strength": wp.array(
+                np.concatenate([b.strengths for b in self._sites]),
+                dtype=float,
+                device=device,
+            ),
+            "depth": wp.zeros((count, count), dtype=float, device=device),
+            "width": wp.ones((count, count), dtype=float, device=device),
+            "max_width": wp.zeros(1, dtype=float, device=device),
+        }
+        # Site ↔ site runs only if the table pairs two site types (a listed
+        # pair's depth can still be keyed live); histones that only bind DNA
+        # skip it. Without a table every pair interacts.
+        self._site_pairs = True
+        if self._has_table:
+            rows = GeometrySet(self.props.source).interactions  # type: ignore[arg-type]
+            a = rows["interaction_a"].astype(int)
+            b = rows.get("interaction_b", rows["interaction_a"]).astype(int)
+            self._site_pairs = bool(
+                (np.isin(a, site_type) & np.isin(b, site_type)).any()
+            )
+        self._update_interactions()
+
+    @property
+    def uses_binding(self) -> bool:
+        return self._binding is not None
+
+    def _interaction_table(self, count: int) -> tuple[np.ndarray, np.ndarray]:
+        """(count × count) depth and width of every pair of interaction types.
+
+        From the source's interaction table when it has one (pairs not listed
+        don't interact; each row sets both orders); otherwise every pair gets
+        the simulation's Binding Depth / Range.
+        """
+        p = self.props
+        if not self._has_table:
+            depth = np.full((count, count), p.binding_depth, dtype=np.float32)
+            width = np.full((count, count), p.binding_width, dtype=np.float32)
+            return depth, width
+        depth = np.zeros((count, count), dtype=np.float32)
+        width = np.full((count, count), p.binding_width, dtype=np.float32)
+        table = GeometrySet(self.props.source).interactions  # type: ignore[arg-type]
+        if not table:
+            return depth, width
+        n = len(table["interaction_a"])
+        a = table["interaction_a"].astype(int)
+        b = table.get("interaction_b", np.zeros(n)).astype(int)
+        d = table.get("interaction_depth", np.full(n, p.binding_depth))
+        w = table.get("interaction_range", np.full(n, p.binding_width))
+        # Types beyond the compiled table have no sites or particles yet
+        ok = (a > 0) & (b > 0) & (a < count) & (b < count) & (w > 0)
+        for ai, bi, di, wi in zip(a[ok], b[ok], d[ok], w[ok], strict=True):
+            depth[ai, bi] = depth[bi, ai] = di
+            width[ai, bi] = width[bi, ai] = wi
+        return depth, width
+
+    def _update_interactions(self) -> None:
+        """Refresh the pair table on the device, in place, so it can be keyed
+        or driven by Geometry Nodes without a re-compile (or a re-recorded
+        CUDA graph)."""
+        if self._binding is None:
+            return
+        count = self._binding["depth"].shape[0]
+        depth, width = self._interaction_table(count)
+        self._binding["depth"].assign(depth)
+        self._binding["width"].assign(width)
+        active = width[depth > 0]
+        self._binding["max_width"].assign(
+            np.array([active.max() if len(active) else 0.0], dtype=np.float32)
+        )
+
+    def _apply_binding(self) -> None:
+        """Interaction forces for this substep: particles ↔ sites, then
+        site ↔ site between bodies."""
+        if self._binding is None:
+            return
+        b = self._binding
+        device = self.model.device
+        tables = [b["depth"], b["width"], b["max_width"]]
+        if self._affinity:
+            wp.launch(
+                kernels.binding_forces,
+                dim=self.model.particle_count,
+                inputs=[
+                    self.state_0.particle_q,
+                    self.model.particle_radius,
+                    b["particle_type"],
+                    b["affinity"],
+                    self.state_0.body_q,
+                    self.model.body_com,
+                    b["bodies"],
+                    b["start"],
+                    b["end"],
+                    b["reach"],
+                    b["local"],
+                    b["normal"],
+                    b["site_type"],
+                    b["strength"],
+                    *tables,
+                ],
+                outputs=[
+                    self.state_0.particle_f,
+                    self.state_0.body_f,
+                    self._particle_bound,
+                ],
+                device=device,
+            )
+        bodies = len(self._sites)
+        if bodies > 1 and self._site_pairs:
+            self._body_partners.zero_()
+            wp.launch(
+                kernels.site_site_forces,
+                dim=(bodies, bodies),
+                inputs=[
+                    self.state_0.body_q,
+                    self.model.body_com,
+                    b["bodies"],
+                    b["start"],
+                    b["end"],
+                    b["reach"],
+                    b["local"],
+                    b["site_type"],
+                    b["strength"],
+                    *tables,
+                ],
+                outputs=[self.state_0.body_f, self._body_partners],
+                device=device,
+            )
+
     @property
     def _uses_thermostat(self) -> bool:
         has_bodies = self.model.particle_count > 0 or self.model.body_count > 0
@@ -1244,6 +1581,7 @@ class Simulator(SimulatorBase):
             self._apply_rigid_scales((i + 1) / substeps)
             self.state_0.clear_forces()
             self._apply_thermostat(sim_dt, i)
+            self._apply_binding()
             last = i == substeps - 1
             if not self._solver_collides:
                 self.collision_pipeline.collide(self.state_0, self.contacts)
@@ -1416,6 +1754,10 @@ class Simulator(SimulatorBase):
             atype="FLOAT4X4",
         )
         part.output.store_named_attribute(velocity, "velocity")
+        if self.uses_binding:
+            partners = np.zeros(len(world), dtype=np.int32)
+            partners[sim] = self._body_partners.numpy()[body]
+            part.output.store_named_attribute(partners, "partners")
 
     def _new_output(
         self, name: str, part: SourcePart, pos: np.ndarray
@@ -1467,6 +1809,7 @@ class Simulator(SimulatorBase):
         velocity = self.velocity
         broken = self.broken_springs if self._contact_ids is not None else None
         colliding = self._particle_colliding.numpy().astype(bool)
+        bound = self._particle_bound.numpy().astype(bool) if self.uses_binding else None
         force = self._particle_contact_f.numpy() if self.reports_contact_force else None
         normal = None
         if self._surface_mesh is not None and self._surface_indices is not None:
@@ -1484,6 +1827,10 @@ class Simulator(SimulatorBase):
             part.output.store_named_attribute(
                 colliding[part.indices], "is_colliding", atype="BOOLEAN"
             )
+            if bound is not None:
+                part.output.store_named_attribute(
+                    bound[part.indices], "bound", atype="BOOLEAN"
+                )
             if force is not None:
                 part.output.store_named_attribute(force[part.indices], "contact_force")
             if part.edges is not None and len(part.edges) and not part.is_cloth:
@@ -1541,6 +1888,7 @@ class Simulator(SimulatorBase):
             self._update_rigid_scales()
             self._update_pinned_particles()
             self._update_surface()
+            self._update_interactions()
             start_simulate = time.time()
             self.simulate()
             # launches are asynchronous; wait so the compute time is real

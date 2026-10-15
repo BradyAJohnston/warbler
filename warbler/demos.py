@@ -39,6 +39,13 @@ def _source_object(name: str, tree: bpy.types.GeometryNodeTree) -> bpy.types.Obj
     return obj
 
 
+def _hide_source(source: bpy.types.Object) -> None:
+    """Hide a source whose output re-places its instances, in the viewport
+    and in renders, so the originals don't show under the simulated copies."""
+    source.hide_set(True)
+    source.hide_render = True
+
+
 def set_modifier_input(obj: bpy.types.Object, name: str, value) -> None:
     """Set an input of the source's GN modifier by its interface name."""
     mod = obj.modifiers["Warbler Source"]
@@ -308,8 +315,17 @@ def membrane_lipids_tree(surface: bpy.types.Object) -> bpy.types.GeometryNodeTre
     return tree.tree
 
 
-def _attribute_material(name: str, attribute_name: str) -> bpy.types.Material:
-    """Blue where ``attribute_name`` is 0, orange where it is 1."""
+BLUE = (0.1, 0.45, 0.9)
+ORANGE = (0.95, 0.45, 0.1)
+
+
+def _attribute_material(
+    name: str,
+    attribute_name: str,
+    low: tuple[float, float, float] = BLUE,
+    high: tuple[float, float, float] = ORANGE,
+) -> bpy.types.Material:
+    """``low`` colour where ``attribute_name`` is 0, ``high`` where it is 1."""
     mat = bpy.data.materials.get(name)
     if mat is not None:
         return mat
@@ -321,8 +337,9 @@ def _attribute_material(name: str, attribute_name: str) -> bpy.types.Material:
     attribute.attribute_name = attribute_name  # ty: ignore[unresolved-attribute]
     mix = tree.nodes.new("ShaderNodeMix")
     mix.data_type = "RGBA"  # ty: ignore[unresolved-attribute]
-    mix.inputs[6].default_value = (0.1, 0.45, 0.9, 1.0)  # ty: ignore[unresolved-attribute]
-    mix.inputs[7].default_value = (0.95, 0.45, 0.1, 1.0)  # ty: ignore[unresolved-attribute]
+    mix.inputs[6].default_value = (*low, 1.0)  # ty: ignore[unresolved-attribute]
+    mix.inputs[7].default_value = (*high, 1.0)  # ty: ignore[unresolved-attribute]
+    mat.diffuse_color = (*low, 1.0)
     tree.links.new(attribute.outputs["Fac"], mix.inputs["Factor"])
     tree.links.new(mix.outputs[2], bsdf.inputs["Base Color"])
     return mat
@@ -495,11 +512,447 @@ def falling_monkeys(context: bpy.types.Context) -> Simulator:
     """Thousands of instanced Suzannes dropped in a heap (XPBD rigid bodies)."""
     source = _source_object("FallingMonkeys", falling_monkeys_tree(_monkey()))
     # The output re-places these instances; hide the originals under it
-    source.hide_set(True)
+    _hide_source(source)
     sim = _new_simulation(context, source)
     sim.props.solver = "XPBD"
     sim.props.use_ground_plane = True
     get_scene().frame_end = 300
+    return sim
+
+
+# ============================================================================
+# Molecular crowd — rigid proteins and flexible DNA in one thermal bath
+# ============================================================================
+
+
+# Interaction types in the molecular crowd
+DNA_BINDING, DIMER, DNA = 1, 2, 3
+
+
+def _protein_blob(seed: int, material: bpy.types.Material, patch, kind: int):
+    """A lumpy, roughly unit-sized icosphere standing in for a folded protein,
+    with binding sites of type ``kind`` on a cap covering ``patch`` of its
+    surface (a sphere cap's area fraction is (1 - cos θ) / 2) around +Z."""
+    sphere = g.IcoSphere(radius=1.0, subdivisions=3)
+    lumps = g.NoiseTexture(scale=1.5, detail=1.0, w=float(seed), noise_dimensions="4D")
+    in_patch = g.Position().o.position.z > 1 - 2 * patch
+    return (
+        nodes.SetBindingSites(sphere, in_patch, type=kind)
+        >> g.SetPosition(offset=g.Normal().o.normal * ((lumps.o.fac - 0.5) * 0.9))
+        >> g.SetShadeSmooth()
+        >> g.SetMaterial(material=material)
+    )
+
+
+def molecular_crowd_tree(
+    binder: bpy.types.Material, dimer: bpy.types.Material
+) -> bpy.types.GeometryNodeTree:
+    """Protein instances (rigid bodies) and DNA curves (particle chains),
+    with an interaction table: DNA-binding proteins' patches attract DNA, and
+    dimerising proteins' patches attract each other.
+
+    Proteins sit on a grid, each one of three lumpy shapes turned at random
+    (two DNA binders, one dimeriser);
+    DNA strands start straight in the gaps between the grid's layers, along
+    all three axes, and are bent by the thermal bath.
+    """
+    with g.tree("Warbler Molecular Crowd", clear=True, is_modifier=True) as tree:
+        box = tree.inputs.float("Box Size", 4.0, min_value=0.1)
+        per_side = tree.inputs.integer("Proteins Per Side", 4, min_value=1)
+        size = tree.inputs.float("Protein Size", 0.3, min_value=0.01)
+        density = tree.inputs.float("Protein Density", 5.0, min_value=0.001)
+        dna_binding = tree.inputs.float(
+            "DNA Binding",
+            0.5,
+            description="Depth of the DNA ↔ binding patch attraction (kT is 0.05)",
+            min_value=0.0,
+        )
+        dimer_binding = tree.inputs.float(
+            "Dimer Binding",
+            0.05,
+            description="Depth of the attraction between two dimerising patches, "
+            "per pair of sites: patches meet over many site pairs at once",
+            min_value=0.0,
+        )
+        dimer_range = tree.inputs.float(
+            "Dimer Range",
+            0.1,
+            description="Width of the dimer attraction: wider than the DNA "
+            "binding so proteins, which diffuse slowly, find each other",
+            min_value=0.0001,
+            subtype="DISTANCE",
+        )
+        patch = tree.inputs.float(
+            "Binding Patch",
+            0.15,
+            description="Fraction of each protein's surface that binds DNA: "
+            "a binding domain, or 1 for non-specific sticking everywhere",
+            min_value=0.0,
+            max_value=1.0,
+            subtype="FACTOR",
+        )
+        strands = tree.inputs.integer("DNA Strands", 16, min_value=0)
+        length = tree.inputs.float("DNA Length", 2.0, min_value=0.01)
+        radius = tree.inputs.float("DNA Radius", 0.04, min_value=0.001)
+        mass = tree.inputs.float("DNA Bead Mass", 0.1, min_value=0.0)
+        seed = tree.inputs.integer("Seed", 0)
+
+        spacing = box / per_side
+        grid = nodes.PointGrid(
+            per_side,
+            per_side,
+            per_side,
+            spacing,
+            g.CombineXYZ(z=spacing * (per_side - 1) / -2),
+            centre=True,
+        )
+        shapes = g.GeometryToInstance(
+            _protein_blob(0, binder, patch, DNA_BINDING),
+            _protein_blob(1, binder, patch, DNA_BINDING),
+            _protein_blob(2, dimer, patch, DIMER),
+        )
+        proteins = (
+            g.InstanceOnPoints(
+                grid,
+                instance=shapes,
+                pick_instance=True,
+                instance_index=g.RandomValue.integer(0, 2, seed=seed),
+                rotation=g.RandomValue.vector(0, 2 * math.pi, seed=seed + 1),
+                scale=g.RandomValue.float(0.8, 1.2, seed=seed + 2) * size,
+            )
+            >> nodes.SetCollider(shape="Convex Hull")
+            >> nodes.SetDensity(density=density)
+        )
+
+        # DNA starts straight along the empty channels between the protein
+        # grid's layers (strands placed through proteins get kinked as the
+        # contacts push their beads out), split between the three axes
+        line = g.CurveLine(
+            start=g.CombineXYZ(x=length / -2), end=g.CombineXYZ(x=length / 2)
+        )
+        reach = g.Math.maximum(box / 2 - length / 2 - radius, 0.0)
+        strands_on_axis = []
+        for axis, rotation in enumerate(
+            ((0.0, 0.0, 0.0), (0.0, 0.0, math.pi / 2), (0.0, -math.pi / 2, 0.0))
+        ):
+            along = g.RandomValue.float(reach * -1, reach, seed=seed + 3 + 10 * axis)
+            channel = [
+                (
+                    g.RandomValue.integer(
+                        0, per_side - 2, seed=seed + 4 + 10 * axis + k
+                    )
+                    - (per_side - 2) / 2
+                )
+                * spacing
+                for k in range(2)
+            ]
+            u, v = channel
+            coords = ((along, u, v), (u, along, v), (u, v, along))[axis]
+            count = (strands + (2 - axis)) // 3
+            starts = g.Points(count, position=g.CombineXYZ(*coords))
+            strands_on_axis.append(
+                g.InstanceOnPoints(starts, instance=line, rotation=rotation)
+            )
+        strands_geometry = (
+            g.JoinGeometry(strands_on_axis)
+            >> g.RealizeInstances()
+            # Beads three radii apart. At contact distance (2r) or closer, XPBD's
+            # particle contact pushes neighbours apart against their bond
+            # springs and the strand buckles; the half-bead gaps left are still
+            # too narrow for another strand's beads to pass through
+            >> g.ResampleCurve(mode="Length", length=radius * 3)
+            >> nodes.SetParticles(mass=mass, radius=radius)
+            >> nodes.SetAffinity(type=DNA)
+        )
+        table = [
+            nodes.Interaction(DNA_BINDING, DNA, depth=dna_binding, range=0.05),
+            nodes.Interaction(DIMER, DIMER, depth=dimer_binding, range=dimer_range),
+        ]
+        g.JoinGeometry([proteins, strands_geometry, *table]) >> tree.outputs.geometry(
+            "Geometry"
+        )
+    return tree.tree
+
+
+def _container(
+    collection: bpy.types.Collection, size: float, thickness: float = 0.2
+) -> None:
+    """Six kinematic walls just outside a cube of side ``size`` at the origin."""
+    offset = (size + thickness) / 2
+    span = size + 2 * thickness
+    for axis, name in enumerate("XYZ"):
+        dims = [span, span, span]
+        dims[axis] = thickness
+        for sign in (-1, 1):
+            location = [0.0, 0.0, 0.0]
+            location[axis] = sign * offset
+            wall = _rigid_box(
+                f"Wall {'+' if sign > 0 else '-'}{name}",
+                collection,
+                tuple(location),  # ty: ignore[invalid-argument-type]
+                tuple(dims),  # ty: ignore[invalid-argument-type]
+            )
+            wall.display_type = "WIRE"
+            wall.hide_render = True
+
+
+def molecular_crowd(context: bpy.types.Context) -> Simulator:
+    """Proteins (rigid instances) and DNA (curves) jostling in a box (XPBD).
+
+    No gravity: a Langevin bath (temperature + drag) keeps everything moving.
+    XPBD is the solver that couples the two: particle-shape contacts push both
+    the strand and the body, and DNA strands also collide with each other.
+    """
+    # Binding patches and bound DNA show in a contrasting colour
+    binder = _attribute_material(
+        "Warbler Protein", "binding", (0.25, 0.55, 0.85), (0.3, 0.8, 0.35)
+    )
+    dimer = _attribute_material(
+        "Warbler Dimer", "binding", (0.6, 0.4, 0.8), (0.95, 0.85, 0.2)
+    )
+    dna = _attribute_material(
+        "Warbler DNA", "bound", (0.95, 0.55, 0.15), (0.85, 0.1, 0.1)
+    )
+    source = _source_object("MolecularCrowd", molecular_crowd_tree(binder, dimer))
+    _hide_source(source)
+
+    scene = get_scene()
+    collection = bpy.data.collections.get("Warbler Rigid")
+    if collection is None:
+        collection = bpy.data.collections.new("Warbler Rigid")
+        scene.collection.children.link(collection)
+    _container(collection, 4.0)
+
+    # Show the DNA as tubes; the output is matched by name on compile, so the
+    # modifier survives
+    name = f"{source.name}_curves"
+    output = bpy.data.objects.get(name)
+    if output is None:
+        output = bpy.data.objects.new(name, bpy.data.hair_curves.new(name))
+        scene.collection.objects.link(output)
+    output.modifiers.clear()
+    mod = output.modifiers.new("Warbler Tube", "NODES")
+    assert isinstance(mod, bpy.types.NodesModifier)
+    mod.node_group = _tube_tree(dna)
+
+    sim = _new_simulation(context, source)
+    item = sim.props
+    item.solver = "XPBD"
+    item.sim_rigid_collection = collection
+    item.use_ground_plane = False
+    item.gravity = 0.0
+    item.temperature = 0.05
+    item.drag = 5.0
+    item.spring_ke = 1.0e3
+    item.spring_kd = 1.0
+    # DNA is stiff on this scale: bent by the bath, not crumpled
+    item.bend_ke = 1.0e3
+    scene.frame_end = 600
+    return sim
+
+
+def _tube_tree(material: bpy.types.Material) -> bpy.types.GeometryNodeTree:
+    """Curves to round tubes of their ``radius``."""
+    with g.tree("Warbler Tube", clear=True, is_modifier=True) as tree:
+        curves = tree.inputs.geometry("Geometry")
+        (
+            g.CurveToMesh(
+                curves,
+                g.CurveCircle(resolution=8),
+                scale=g.NamedAttribute.float("radius"),
+                fill_caps=True,
+            )
+            >> g.SetShadeSmooth()
+            >> g.SetMaterial(material=material)
+            >> tree.outputs.geometry("Geometry")
+        )
+    return tree.tree
+
+
+# ============================================================================
+# Nucleosomes — one DNA strand wrapped 1.5 turns around each histone
+# ============================================================================
+
+# Interaction types in the nucleosome demo
+HISTONE, LINKED_DNA = 1, 2
+# 1.5 turns: the DNA enters and leaves the histone on the same side
+WRAP_TURNS = 1.5
+# Raw path samples per nucleosome unit (the strand is resampled to beads)
+LINKER_SAMPLES, WRAP_SAMPLES = 40, 160
+
+
+def _helix(u, radius, pitch, z0):
+    """Point ``u`` (0..1) along the 1.5-turn left-handed superhelix: from
+    angle π at height ``z0``, turning clockwise seen from +Z while rising."""
+    angle = math.pi - 2 * math.pi * WRAP_TURNS * u
+    return g.CombineXYZ(
+        g.Math.cosine(angle) * radius,
+        g.Math.sine(angle) * radius,
+        z0 + u * (WRAP_TURNS * pitch),
+    )
+
+
+def nucleosomes_tree(
+    histone: bpy.types.Material,
+) -> bpy.types.GeometryNodeTree:
+    """A chain of histones on one long DNA curve, as a zig-zag fibre.
+
+    Each nucleosome unit is an incoming linker heading +Y at x = -w (w is the
+    wrap radius: histone + DNA radius), 1.5 left-handed turns around the
+    histone's Z axis, and an outgoing linker heading -Y at x = +w: in and out
+    on the same side. Every other unit is turned 180° about X, which puts its
+    entry exactly at the previous unit's exit, so units step 2w along X and
+    alternate between two rows a linker apart. Ordered by unit then index,
+    the points become one curve.
+
+    Each histone is a capsule mesh plus loose vertices along the groove the
+    DNA lies in, carrying binding sites: closely spaced so the DNA slides
+    along the groove ("Slide"), or one per DNA bead so each bead sits in its
+    own well and the DNA holds its place.
+    """
+    with g.tree("Warbler Nucleosomes", clear=True, is_modifier=True) as tree:
+        count = tree.inputs.integer("Histones", 6, min_value=1)
+        linker = tree.inputs.float("Linker Length", 1.2, min_value=0.1)
+        radius = tree.inputs.float("Histone Radius", 0.3, min_value=0.01)
+        dna_radius = tree.inputs.float("DNA Radius", 0.05, min_value=0.001)
+        pitch = tree.inputs.float(
+            "Wrap Pitch",
+            0.15,
+            description="Rise per turn of the wrapped DNA; above its diameter",
+            min_value=0.0,
+        )
+        strength = tree.inputs.float(
+            "Wrap Strength",
+            0.5,
+            description="Depth of the histone ↔ DNA attraction (kT is 0.05)",
+            min_value=0.0,
+        )
+        slide = tree.inputs.boolean(
+            "Slide",
+            True,
+            description="DNA slides along the histone's groove; off, each bead "
+            "holds to its own binding site",
+        )
+        pin = tree.inputs.boolean("Pin Ends", False)
+        pull = tree.inputs.float(
+            "Pull", 0.0, description="Moves the pinned last bead along +X"
+        )
+
+        wrap = radius + dna_radius
+        z0 = pitch * (WRAP_TURNS / -2)
+        half = linker / 2
+        bead = dna_radius * 3
+
+        # One nucleosome unit's path, as ordered points
+        per_unit = 2 * LINKER_SAMPLES - 1 + WRAP_SAMPLES
+        k = g.Index().o.index
+        incoming = g.CombineXYZ(-1 * wrap, (k / LINKER_SAMPLES - 1) * half, z0)
+        u = (k - LINKER_SAMPLES) / (WRAP_SAMPLES - 1)
+        wound = _helix(u, wrap, pitch, z0)
+        t = (k - LINKER_SAMPLES - WRAP_SAMPLES + 1) / LINKER_SAMPLES
+        outgoing = g.CombineXYZ(wrap, t * half * -1, z0 * -1)
+        in_wrap = k >= LINKER_SAMPLES
+        past_wrap = k >= LINKER_SAMPLES + WRAP_SAMPLES
+        position = past_wrap.switch.vector(
+            in_wrap.switch.vector(incoming, wound), outgoing
+        )
+        unit = g.Points(
+            per_unit, position=position
+        ) >> g.StoreNamedAttribute.point.integer(name="order", value=k)
+
+        # Unit centres: 2w along X, alternate units a linker down and flipped
+        i = g.Index().o.index
+        odd = i % 2
+        centres = g.Points(
+            count, position=g.CombineXYZ(i * wrap * 2, odd * linker * -1)
+        )
+        flip = g.CombineXYZ(odd * math.pi)
+
+        strand = (
+            g.InstanceOnPoints(centres, instance=unit, rotation=flip)
+            >> g.StoreNamedAttribute.instance.integer(name="unit", value=g.Index())
+            >> g.RealizeInstances()
+        )
+        weight = g.NamedAttribute.integer("unit") * per_unit + g.NamedAttribute.integer(
+            "order"
+        )
+        ends = g.EndpointSelection(start_size=1, end_size=1)
+        last = g.EndpointSelection(start_size=0, end_size=1)
+        dna = (
+            g.PointsToCurves(strand, weight=weight)
+            >> g.ResampleCurve(mode="Length", length=bead)
+            >> g.SetPosition(selection=last & pin, offset=g.CombineXYZ(pull))
+            >> nodes.SetPinned(pinned=ends & pin)
+            >> nodes.SetParticles(mass=0.1, radius=dna_radius)
+            >> nodes.SetAffinity(type=LINKED_DNA)
+        )
+
+        # Histone: a capsule (pill) around Z, plus groove vertices with sites
+        top = g.Position().o.position.z > 0
+        capsule = g.UVSphere(segments=24, rings=12, radius=radius) >> g.SetPosition(
+            offset=g.CombineXYZ(z=top.switch.float(pitch * -1.4, pitch * 1.4))
+        )
+        groove_length = 2 * math.pi * WRAP_TURNS * radius
+        spacing = slide.switch.float(bead, dna_radius * 0.5)
+        sites = g.Math.ceil(groove_length / spacing) + 1
+        n = g.Index().o.index
+        groove = (
+            g.Points(sites, position=_helix(n / (sites - 1), radius, pitch, z0))
+            >> g.PointsToVertices()
+            >> nodes.SetBindingSites(type=HISTONE)
+        )
+        histone_mesh = g.JoinGeometry([capsule, groove]) >> g.SetMaterial(
+            material=histone
+        )
+        histones = (
+            g.InstanceOnPoints(centres, instance=histone_mesh, rotation=flip)
+            >> nodes.SetCollider(shape="Capsule")
+            >> nodes.SetDensity(density=5.0)
+        )
+
+        table = nodes.Interaction(HISTONE, LINKED_DNA, depth=strength, range=0.05)
+        g.JoinGeometry([histones, dna, table]) >> tree.outputs.geometry("Geometry")
+    return tree.tree
+
+
+def nucleosomes(context: bpy.types.Context) -> Simulator:
+    """DNA wrapped around a chain of histones in a thermal bath (XPBD).
+
+    The wrap is held only by the groove's binding sites: the DNA rests
+    straight (``bend_rest_straight``), so unbound it would spring off.
+    """
+    histone = _attribute_material(
+        "Warbler Histone", "binding", (0.55, 0.6, 0.75), (0.55, 0.6, 0.75)
+    )
+    dna = _attribute_material(
+        "Warbler DNA", "bound", (0.95, 0.55, 0.15), (0.85, 0.1, 0.1)
+    )
+    source = _source_object("Nucleosomes", nucleosomes_tree(histone))
+    _hide_source(source)
+
+    scene = get_scene()
+    name = f"{source.name}_curves"
+    output = bpy.data.objects.get(name)
+    if output is None:
+        output = bpy.data.objects.new(name, bpy.data.hair_curves.new(name))
+        scene.collection.objects.link(output)
+    output.modifiers.clear()
+    mod = output.modifiers.new("Warbler Tube", "NODES")
+    assert isinstance(mod, bpy.types.NodesModifier)
+    mod.node_group = _tube_tree(dna)
+
+    sim = _new_simulation(context, source)
+    item = sim.props
+    item.solver = "XPBD"
+    item.use_ground_plane = False
+    item.gravity = 0.0
+    item.temperature = 0.05
+    item.drag = 5.0
+    item.spring_ke = 1.0e3
+    item.spring_kd = 1.0
+    item.bend_ke = 1.0e3
+    item.bend_rest_straight = True
+    scene.frame_end = 600
     return sim
 
 
@@ -673,6 +1126,16 @@ DEMOS: dict[str, tuple[str, str, Callable[[bpy.types.Context], Simulator]]] = {
         "Falling Monkeys",
         "Thousands of instanced meshes as rigid bodies (XPBD)",
         falling_monkeys,
+    ),
+    "MOLECULAR_CROWD": (
+        "Molecular Crowd",
+        "Rigid protein instances and DNA curves in a thermal bath (XPBD)",
+        molecular_crowd,
+    ),
+    "NUCLEOSOMES": (
+        "Nucleosomes",
+        "One DNA strand wrapped 1.5 turns around each histone (XPBD)",
+        nucleosomes,
     ),
     "MEMBRANE_FUSION": (
         "Membrane Fusion",

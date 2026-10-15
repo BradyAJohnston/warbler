@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 import bpy
 import databpy as db
 import numpy as np
@@ -16,6 +18,18 @@ PARTICLE_ATTRIBUTES = (
     "on_surface",
     "surface_offset",
     "attach",
+    "affinity",
+    "affinity_type",
+)
+
+# Points flagged ``interaction`` are rows of the interaction table, not
+# particles: a pair of types with the depth and range of their attraction
+INTERACTION_FLAG = "interaction"
+INTERACTION_ATTRIBUTES = (
+    "interaction_a",
+    "interaction_b",
+    "interaction_depth",
+    "interaction_range",
 )
 
 
@@ -26,11 +40,18 @@ class GeometryAttributes:
         self,
         data: bpy.types.Mesh | bpy.types.PointCloud | bpy.types.Curves | None,
         owner: "GeometrySet | None" = None,
+        rows: np.ndarray | None = None,
     ):
         self._data = data
         # Evaluated data is freed with the GeometrySet that produced it, so
         # keep it alive for as long as these attributes are.
         self._owner = owner
+        # Boolean mask of the points that belong here (None: all of them)
+        self._rows = rows
+
+    def _array(self, attr) -> np.ndarray:
+        values = db.Attribute(attr).as_array()
+        return values if self._rows is None else values[self._rows]
 
     @property
     def attributes(self):
@@ -44,7 +65,7 @@ class GeometryAttributes:
             return {}
         attrs = self._data.attributes
         return {
-            name: db.Attribute(attrs[name]).as_array()
+            name: self._array(attrs[name])
             for name in PARTICLE_ATTRIBUTES
             if name in attrs and attrs[name].domain == "POINT"
         }
@@ -52,6 +73,8 @@ class GeometryAttributes:
     def __len__(self) -> int:
         if self._data is None or "position" not in self._data.attributes:
             return 0
+        if self._rows is not None:
+            return int(self._rows.sum())
         return len(self._data.attributes["position"].data)  # ty: ignore[unresolved-attribute]
 
     @property
@@ -105,9 +128,11 @@ class GeometryAttributes:
                 attr.domain != "POINT"
                 or attr.name == "position"
                 or attr.name.startswith(".")
+                or attr.name == INTERACTION_FLAG
+                or attr.name in INTERACTION_ATTRIBUTES
             ):
                 continue
-            out[attr.name] = (db.Attribute(attr).as_array(), attr.data_type)
+            out[attr.name] = (self._array(attr), attr.data_type)
         return out
 
     @property
@@ -185,10 +210,41 @@ class GeometrySet:
             _as_geom_data(data) if isinstance(data, kind) else None, self
         )
 
+    def _interaction_rows(self) -> np.ndarray | None:
+        """Which points of the point cloud are interaction-table rows."""
+        data = self._component("pointcloud", bpy.types.PointCloud)._data
+        if data is None or INTERACTION_FLAG not in data.attributes:
+            return None
+        return db.Attribute(data.attributes[INTERACTION_FLAG]).as_array().astype(bool)
+
     @property
     def points(self) -> GeometryAttributes:
-        """The point cloud component — simulated as free particles."""
-        return self._component("pointcloud", bpy.types.PointCloud)
+        """The point cloud component — simulated as free particles, except the
+        points that are interaction-table rows."""
+        points = self._component("pointcloud", bpy.types.PointCloud)
+        table = self._interaction_rows()
+        if table is not None:
+            points._rows = ~table
+        return points
+
+    @property
+    def interactions(self) -> dict[str, np.ndarray]:
+        """The interaction table: a pair of interaction types per row
+        (``interaction_a`` / ``_b``) and their attraction's ``interaction_depth``
+        and ``interaction_range``. Empty when the source has none."""
+        table = self._interaction_rows()
+        if table is None or not table.any():
+            return {}
+        rows = GeometryAttributes(
+            self._component("pointcloud", bpy.types.PointCloud)._data, self, table
+        )
+        attrs = rows.attributes
+        assert attrs is not None
+        return {
+            name: rows._array(attrs[name])
+            for name in INTERACTION_ATTRIBUTES
+            if name in attrs
+        }
 
     @property
     def curves(self) -> GeometryAttributes:
@@ -222,8 +278,33 @@ class GeometrySet:
         )
 
 
+class ReferenceMesh(NamedTuple):
+    """An instanced mesh: vertices, (M, 3) triangles, and the POINT ``binding``
+    strength and ``binding_type`` of each vertex (binding sites), if it has
+    them."""
+
+    vertices: np.ndarray
+    triangles: np.ndarray
+    binding: np.ndarray | None
+    binding_type: np.ndarray | None = None
+    normals: np.ndarray | None = None
+
+
 # INSTANCE-domain attributes warbler reads for rigid bodies
 INSTANCE_ATTRIBUTES = ("collider", "velocity", "density")
+
+
+def _vertex_normals(mesh: bpy.types.Mesh) -> np.ndarray:
+    normals = np.zeros(len(mesh.vertices) * 3, dtype=np.float32)
+    mesh.vertex_normals.foreach_get("vector", normals)
+    return normals.reshape(-1, 3)
+
+
+def _point_attribute(mesh: bpy.types.Mesh, name: str) -> np.ndarray | None:
+    attr = mesh.attributes.get(name)
+    if attr is None or attr.domain != "POINT":
+        return None
+    return db.Attribute(attr).as_array()
 
 
 def _reference_mesh(reference: object) -> bpy.types.Mesh | None:
@@ -280,9 +361,9 @@ class InstanceAttributes:
             if name in attrs
         }
 
-    def reference_geometry(self) -> list[tuple[np.ndarray, np.ndarray] | None]:
-        """(vertices, (M, 3) triangles) of each reference, None if it has no mesh."""
-        out: list[tuple[np.ndarray, np.ndarray] | None] = []
+    def reference_geometry(self) -> list[ReferenceMesh | None]:
+        """The mesh of each reference, None if it has none."""
+        out: list[ReferenceMesh | None] = []
         for reference in self._references:
             mesh = _reference_mesh(reference)
             if mesh is None or len(mesh.vertices) == 0:
@@ -290,5 +371,13 @@ class InstanceAttributes:
                 continue
             vertices = np.zeros(len(mesh.vertices) * 3, dtype=np.float32)
             mesh.vertices.foreach_get("co", vertices)
-            out.append((vertices.reshape(-1, 3), GeometryAttributes(mesh).triangles))
+            out.append(
+                ReferenceMesh(
+                    vertices.reshape(-1, 3),
+                    GeometryAttributes(mesh).triangles,
+                    _point_attribute(mesh, "binding"),
+                    _point_attribute(mesh, "binding_type"),
+                    _vertex_normals(mesh),
+                )
+            )
         return out

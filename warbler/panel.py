@@ -22,6 +22,8 @@ _KNOWN_PARTICLE_ATTRS = {
     "pinned",
     "on_surface",
     "surface_offset",
+    "affinity",
+    "binding",
     "attach",
 }
 
@@ -242,6 +244,7 @@ class WB_PT_WarblerPanel(Panel):
                 col.prop(item, "spring_ke")
                 col.prop(item, "spring_kd")
                 col.prop(item, "bend_ke")
+                col.prop(item, "bend_rest_straight")
                 col.prop(item, "network_cutoff")
                 col.prop(item, "domain_coupling")
                 col.prop(item, "break_strain")
@@ -254,6 +257,10 @@ class WB_PT_WarblerPanel(Panel):
             col.prop(item, "gravity")
             col.prop(item, "temperature")
             col.prop(item, "drag")
+            col.separator()
+            col.label(text="Binding (affinity ↔ binding sites)")
+            col.prop(item, "binding_depth")
+            col.prop(item, "binding_width")
 
         header, panel = create_panel(layout, "cloth", default_closed=True)
         header.label(text="Cloth")

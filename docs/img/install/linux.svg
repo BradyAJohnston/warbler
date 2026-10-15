@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="236" height="52" viewBox="0 0 236 52">
+  <rect x="1" y="1" width="234" height="50" rx="10" fill="#232323" stroke="#e87d0d" stroke-width="2"/>
+  <g fill="none" stroke="#e87d0d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" transform="translate(16 13)">
+    <path d="M13 2v15M7 11l6 6 6-6M3 21v3h20v-3"/>
+  </g>
+  <text x="52" y="22" fill="#ffffff" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="15" font-weight="600">Drag into Blender</text>
+  <text x="52" y="40" fill="#e87d0d" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13">Linux</text>
+</svg>

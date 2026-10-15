@@ -33,6 +33,11 @@ The core idea: GN sets up geometry and attributes → warbler reads them at comp
 | `velocity` | `FLOAT_VECTOR` | POINT | Initial particle velocities |
 | `mass` | `FLOAT` | POINT | Per-particle mass |
 | `radius` | `FLOAT` | POINT | Collision radius |
+| `affinity_type` | `INT` | POINT | Interaction type of the particle (see the interaction table) |
+| `affinity` | `FLOAT` | POINT | Strength multiplier of its interactions (0 = never binds) |
+| `binding_type` | `INT` | POINT, on an instanced mesh | Interaction type of that vertex's binding site, carried with the rigid body |
+| `binding` | `FLOAT` | POINT, on an instanced mesh | Binding site strength multiplier |
+| `interaction` + `interaction_a/_b/_depth/_range` | `BOOLEAN`, `INT`, `FLOAT` | POINT | Interaction-table rows (not simulated): which two types attract, how deep and how far; re-read every frame |
 
 ---
 
@@ -77,6 +82,8 @@ Material properties below are **global** in Newton's XPBD (not per-particle). Re
 | `is_colliding` | `BOOLEAN` | POINT | Every output object — within 0.1 × radius of a rigid shape / ground |
 | `contact_force` | `FLOAT_VECTOR` | POINT | Every output object, VBD only — force from rigid shapes / ground [N] |
 | `wb.contact_force` | object prop | — | Rigid objects, VBD only — total force from particles [N] |
+| `bound` | `BOOLEAN` | POINT | Particle outputs, with interactions — within 2 × range of a site it interacts with |
+| `partners` | `INT` | POINT | Instances output, with interactions — number of bodies bound to it site to site |
 | `instance_transform` | `FLOAT4X4` | POINT | Instances output — simulated world transform (scale kept) |
 | `velocity` | `FLOAT_VECTOR` | POINT | Instances output — body linear velocity |
 

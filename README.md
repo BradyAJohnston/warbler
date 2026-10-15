@@ -1,27 +1,78 @@
-# warbler
+# Warbler
 
-An add-on to bring interactive GPU simuilations via NVIDIA's [warp](https://github.com/NVIDIA/warp) to Blender's viewport.
+A Blender add-on for interactive GPU simulations in the viewport, powered by NVIDIA's [Newton](https://github.com/newton-physics/newton) physics engine and [Warp](https://github.com/NVIDIA/warp).
 
-## Usage
+Build the simulation's geometry with Geometry Nodes — particles, ropes and strands (curves), cloth (meshes) and rigid bodies (instances) — then compile it and scrub the timeline: it simulates live as frames change, and you can move objects around while it runs.
 
-Build components for a simulation through Geometry Nodes, then compile a simulation to run on the GPU through NVIDIA's [`newton`](https://github.com/newton-physics/newton) and [`warp`](https://github.com/NVIDIA/warp) frameworks.
+[![Ropes hanging over a cube, simulated live in the viewport](docs/img/interactive_curves.gif)](docs/img/interactive_curves.mp4)
 
-![](docs/img/interactive_curves.mp4)
+> [!WARNING]
+> Warbler is early, work-in-progress software. Expect rough edges and breaking changes between versions.
 
 ## Installation
 
-Use the `uv` package manager, ensure it is installed on your system.
+Warbler needs **Blender 5.2** or newer. Simulations run fastest on an NVIDIA GPU (CUDA); other machines, including Apple Silicon Macs, fall back to the much slower CPU device.
 
-Inside the cloner repo, run these commands:
+### Drag and drop (recommended)
 
-Download required packages and setup the `blender_manifest.toml` with this command:
+Drag the button for your platform from this page into a Blender window:
 
-```bash
-uvx extbpy sync
+[![Drag into Blender: Linux](docs/img/install/linux.svg)](https://github.com/BradyAJohnston/warbler/releases/latest/download/warbler-linux_x64.zip?repository=./index.json&blender_version_min=5.2.0&platforms=linux-x64)
+[![Drag into Blender: Windows](docs/img/install/windows.svg)](https://github.com/BradyAJohnston/warbler/releases/latest/download/warbler-windows_x64.zip?repository=./index.json&blender_version_min=5.2.0&platforms=windows-x64)
+[![Drag into Blender: macOS Apple Silicon](docs/img/install/macos.svg)](https://github.com/BradyAJohnston/warbler/releases/latest/download/warbler-macos_arm64.zip?repository=./index.json&blender_version_min=5.2.0&platforms=macos-arm64)
+
+Blender asks to allow online access, then to add the repository, then installs the add-on. Every new release then shows up as an update under **Edit → Preferences → Get Extensions** (enable **Check for Updates on Startup** on the repository to be told automatically).
+
+### Add the repository by hand
+
+**Edit → Preferences → Get Extensions → Repositories**, click **+** → **Add Remote Repository**, paste this URL, then install **Warbler** from **Get Extensions**:
+
+```
+https://github.com/BradyAJohnston/warbler/releases/latest/download/index.json
 ```
 
-Build the standalone `.zip` that is required for regular installation:
+Warbler is also listed in [BradyAJohnston/extensions](https://bradyajohnston.github.io/extensions/) (`https://bradyajohnston.github.io/extensions/index.json`) alongside other add-ons; subscribe to one repository or the other, not both.
+
+### Install a release manually
+
+Click a button above (or pick the `.zip` from the [latest release](https://github.com/BradyAJohnston/warbler/releases/latest)) to download it, then drag the file into Blender or use **Get Extensions → ⌄ → Install from Disk**. Installed this way it doesn't update.
+
+## Getting started
+
+Open the **Warbler** tab in the 3D viewport's sidebar (`N`) and pick one of the demos from **Add Demo** — falling monkeys, hanging cloth, ropes, a molecular crowd, nucleosomes, and more. Each builds its geometry in a Geometry Nodes tree you can edit, then press **Compile** and play the timeline.
+
+The node groups used to set up simulations (Set Particles, Set Collider, Set Binding Sites, …) are available under **Add → Warbler** in the Geometry Nodes editor and in the Asset Browser.
+
+## Development
+
+Development uses [`uv`](https://docs.astral.sh/uv/) and [`extbpy`](https://github.com/BradyAJohnston/extbpy):
 
 ```bash
-uvx extbpy build
+git clone https://github.com/BradyAJohnston/warbler.git
+cd warbler
+uv sync --all-extras
+uv run nodebpy build   # build the node-group asset library (warbler/assets/nodes.blend)
+uvx extbpy sync        # write blender_manifest.toml + wheels into warbler/ to load it from source
+uvx extbpy build       # build the per-platform .zip files
 ```
+
+Run the tests with `uv run pytest tests/`.
+
+To build the zips and check them with Blender's `extension validate` the way CI does, point `extbpy` at a Blender 5.2 executable (without one the check is skipped):
+
+```bash
+uvx extbpy build --blender /path/to/blender
+```
+
+CI builds and validates the zips on every push and pull request; download them from the run's artifacts to test a commit before release.
+
+### Releasing
+
+Push a version tag:
+
+```bash
+git tag v0.0.10
+git push origin v0.0.10
+```
+
+The [release workflow](.github/workflows/release.yml) sets the version from the tag, builds the node assets and the per-platform zips, and publishes them as a GitHub release. It also uploads an `index.json`, which makes `releases/latest/download/` an extension repository, so subscribers get the update straight away; the zips have no version in their names so the drag-and-drop links always point at the newest build. The [extensions site](https://github.com/BradyAJohnston/extensions) picks it up at its next daily rebuild (drafts and pre-releases are skipped).

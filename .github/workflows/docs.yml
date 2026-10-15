@@ -80,9 +80,11 @@ jobs:
           env_url: 'https://${{ steps.deployment.outputs.env }}--warbler.netlify.app'
           logs: 'https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           
-      - name: Deploy Release Documentation
+      # Releases are published by the release workflow's GITHUB_TOKEN, which
+      # doesn't trigger other workflows, so the site follows main instead
+      - name: Deploy Documentation
         uses: peaceiris/actions-gh-pages@v3
-        if: github.event_name == 'release'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: docs/_build

@@ -1,17 +1,29 @@
-name: Build and Create Draft Release
+name: Build and Release
+
+# Pushing a tag `vX.Y.Z` builds the per-platform extension zips and publishes
+# them as a GitHub release, together with an index.json that makes the
+# release's download URL an extension repository:
+#
+#   https://github.com/BradyAJohnston/warbler/releases/latest/download/index.json
+#
+# Zip names carry no version, so `releases/latest/download/warbler-<platform>.zip`
+# always points at the newest build. The README's drag-and-drop buttons link
+# there with `?repository=./index.json`; Blender adds the repository and
+# installs, then offers each new release as an update. The extensions site
+# (https://bradyajohnston.github.io/extensions/index.json) also indexes the
+# latest published release (drafts and pre-releases are skipped).
 
 on:
   push:
     tags:
       - "v*"
 
-# Cancel in-progress runs when a new workflow with the same group is triggered
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-and-draft-release:
+  build-and-release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -24,17 +36,47 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      # The tag is the version: Blender only offers an update when the
+      # manifest's version is higher than the installed one.
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          uv version --no-sync "$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
       - name: Build node assets
         run: |
-          uv sync
+          uv sync --extra bpy
           uv run nodebpy build
 
-      - name: Build Extension
+      # Validated with Blender's `extension validate`, as in CI
+      - name: Build extension
         run: |
-          uvx extbpy build
+          uvx extbpy build --blender blender -o dist
 
-      - name: Create Draft Release
+      # Blender's drag-and-drop install only proceeds when the dropped URL
+      # equals an archive_url in the repository's index.json
+      - name: Generate repository index
         run: |
-          gh release create ${{ github.ref_name }} --draft --generate-notes *.zip
+          mkdir repo
+          for zip in dist/*.zip; do
+            cp "$zip" "repo/warbler-${zip##*-}"  # warbler-0.0.10-linux_x64.zip -> warbler-linux_x64.zip
+          done
+          blender --command extension server-generate --repo-dir=repo
+          cat repo/index.json
+
+      - name: Publish release
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --latest repo/*.zip repo/index.json
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+
+      # Optional: rebuild the extension repo now rather than at its next daily
+      # run. Needs a token with access to BradyAJohnston/extensions and a
+      # `repository_dispatch` trigger in its workflow.
+      - name: Rebuild extension repo
+        env:
+          GH_TOKEN: ${{ secrets.EXTENSIONS_DISPATCH_TOKEN }}
+        if: env.GH_TOKEN != ''
+        run: |
+          gh api repos/BradyAJohnston/extensions/dispatches -f event_type=release -f "client_payload[repo]=$GITHUB_REPOSITORY"

@@ -129,6 +129,24 @@ class SimulationListItem(bpy.types.PropertyGroup):
         default=0.0,
         min=0.0,
     )
+    binding_depth: FloatProperty(  # type: ignore
+        name="Binding Depth",
+        description=(
+            "Depth of the attraction between particles with an `affinity` "
+            "attribute and binding sites (POINT `binding` on instanced meshes), "
+            "in the same units as Temperature: well above it binding sticks, "
+            "near it particles bind and unbind"
+        ),
+        default=0.5,
+        min=0.0,
+    )
+    binding_width: FloatProperty(  # type: ignore
+        name="Binding Range",
+        description="Width of each binding site's attraction; it reaches 3 times this",
+        default=0.05,
+        min=0.0001,
+        subtype="DISTANCE",
+    )
     ground_plane_vector: FloatVectorProperty("Ground Normal", default=(0, 0, 1))  # type: ignore
 
     sim_rigid_collection: PointerProperty(  # type: ignore
@@ -165,6 +183,15 @@ class SimulationListItem(bpy.types.PropertyGroup):
         ),
         default=1.0e2,
         min=0.0,
+    )
+    bend_rest_straight: BoolProperty(  # type: ignore
+        name="Straight Rest Shape",
+        description=(
+            "Curves rest straight: bend springs resist any bending. Off, they "
+            "rest in the curve's starting shape, so a curve that starts coiled "
+            "springs back to that coil"
+        ),
+        default=False,
     )
     cloth_tri_ke: FloatProperty(  # type: ignore
         name="Stretch Stiffness",

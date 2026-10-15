@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["*"]
+  workflow_dispatch:
+
+# Cancel in-progress runs when a new workflow with the same group is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Check code style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/ruff-action@v3
+      - name: Check code formatting
+        run: ruff format --diff
+      - name: Lint code base
+        run: ruff check
+
+  roundtrip:
+    name: Node asset roundtrip
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Install warbler
+        run: |
+          uv sync --extra bpy
+      - name: Check sources survive build -> dump
+        timeout-minutes: 15
+        run: |
+          uv run nodebpy check
+
+  build:
+    name: Build Extension
+    needs: [lint]
+    runs-on: ubuntu-latest
+    env:
+      ADDON_NAME: warbler
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: BradyAJohnston/setup-blender@v5
+        with:
+          version: 5.2
+      - name: Build node assets
+        run: |
+          uv sync --extra bpy
+          uv run nodebpy build
+      # extbpy validates each zip with `blender --command extension validate`
+      # (Blender is on PATH from setup-blender) and fails the build if invalid
+      - name: Build extension
+        run: |
+          uvx extbpy build --blender blender -o artifact
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ADDON_NAME }}-${{ github.sha }}
+          retention-days: 7
+          path: ./artifact/*.zip

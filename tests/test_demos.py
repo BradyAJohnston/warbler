@@ -1,5 +1,7 @@
 """Demo scenes built with Geometry Nodes, checked like the Newton examples they copy."""
 
+import math
+
 import bpy
 import databpy as db
 import newton
@@ -11,9 +13,9 @@ from nodebpy.builder.asset import build_from_source
 from scipy.spatial.transform import Rotation
 
 from warbler import demos, nodes
-from warbler.geometryset import GeometrySet
+from warbler.geometryset import GeometrySet, ReferenceMesh
 from warbler.manager import get_manager
-from warbler.simulation import COLLIDERS, Simulator
+from warbler.simulation import COLLIDERS, Simulator, collider_surface
 from warbler.utils import get_scene
 
 # Set Collider's menu, in COLLIDERS order
@@ -462,6 +464,415 @@ def test_rigid_bodies_feel_temperature(solver):
         angular.append(np.einsum("ni,nij,nj->n", w, inertia, w).mean())
     assert np.mean(linear) == pytest.approx(kT, rel=0.15)
     assert np.mean(angular) == pytest.approx(3 * kT, rel=0.15)
+
+
+def test_curves_and_instances_push_each_other():
+    """XPBD couples particles and rigid bodies both ways: a body moving into a
+    free strand pushes it along and loses the momentum it gives the strand."""
+    with g.tree("Warbler Coupling Test", clear=True, is_modifier=True) as tree:
+        body = (
+            g.InstanceOnPoints(
+                g.Points(1, position=(-1.5, 0.0, 0.0)),
+                instance=g.IcoSphere(radius=0.4, subdivisions=2),
+            )
+            >> nodes.geometry.SetCollider(shape="Sphere")
+            >> nodes.geometry.SetVelocity(velocity=(2.0, 0.0, 0.0))
+        )
+        strand = (
+            g.CurveLine(start=(0.0, -1.0, 0.0), end=(0.0, 1.0, 0.0))
+            >> g.ResampleCurve(count=40)
+            >> nodes.geometry.SetParticles(mass=0.05, radius=0.03)
+        )
+        g.JoinGeometry([body, strand]) >> tree.outputs.geometry("Geometry")
+    source = demos._source_object("CouplingTest", tree.tree)
+    sim = demos._new_simulation(bpy.context, source)
+    sim.props.solver = "XPBD"
+    sim.props.gravity = 0.0
+    sim.props.use_ground_plane = False
+    q = _run(sim, 60)
+    body_mass = float(sim.model.body_mass.numpy()[0])  # ty: ignore[unresolved-attribute]
+    strand_mass = float(sim.model.particle_mass.numpy().sum())  # ty: ignore[unresolved-attribute]
+    body_v = float(sim.state_0.body_qd.numpy()[0, 0])  # ty: ignore[unresolved-attribute]
+    strand_v = sim.state_0.particle_qd.numpy()[:, 0]  # ty: ignore[unresolved-attribute]
+    assert q[:, 0].mean() > 0.5, "the body pushed the strand along"
+    assert body_v < 2.0 - 1e-3, "and was slowed by it"
+    # Momentum is conserved: what the body lost, the strand gained
+    gained = strand_mass * strand_v.mean()
+    assert gained == pytest.approx(body_mass * (2.0 - body_v), rel=0.15)
+
+
+def test_molecular_crowd():
+    """Proteins (instances) and DNA (curves) jostle in their box: everything
+    stays inside, proteins drift and turn, DNA keeps its bonds, and DNA never
+    sinks into a protein."""
+    sim = demos.molecular_crowd(bpy.context)
+    get_scene().frame_set(1)
+    sim.compile()
+    part = sim.parts[0]
+    assert part.curve_sizes is not None and len(part.curve_sizes) == 16
+    ends = np.cumsum(part.curve_sizes)[:-1] - 1
+
+    def bonds(x: np.ndarray) -> np.ndarray:
+        return np.delete(np.linalg.norm(np.diff(x, axis=0), axis=1), ends)
+
+    rest = bonds(sim.particle_positions)
+    q = _run(sim, 120)
+    bodies = sim.state_0.body_q.numpy()[6:]  # ty: ignore[unresolved-attribute]
+    assert len(bodies) == 64
+    assert np.abs(q).max() < 2.0 and np.abs(bodies[:, :3]).max() < 2.0
+    spin = np.linalg.norm(sim.state_0.body_qd.numpy()[6:, 3:], axis=1)  # ty: ignore[unresolved-attribute]
+    assert np.median(spin) > 0.1, "proteins tumble"
+    np.testing.assert_allclose(bonds(q), rest, rtol=0.15)
+    # Bent by the bath, not buckled: strands stay mostly extended
+    starts = np.concatenate([[0], ends + 1])
+    span = np.linalg.norm(q[np.append(ends, len(q) - 1)] - q[starts], axis=1)
+    contour = np.add.reduceat(np.append(bonds(q), 0.0), starts - np.arange(16))
+    assert np.mean(span / contour) > 0.7
+    # and some of it has found the proteins' binding patches
+    assert sim._particle_bound.numpy().any()
+
+
+def _binding_scene(patch: bool, temperature: float, depth: float) -> Simulator:
+    """A strand with affinity lying across a protein's top, whose binding sites
+    are either a cap around +Z or its whole surface."""
+    with g.tree("Warbler Binding Test", clear=True, is_modifier=True) as tree:
+        cap = g.Normal().o.normal.z > 0.6
+        protein = nodes.geometry.SetBindingSites(
+            g.IcoSphere(radius=0.4, subdivisions=3), cap if patch else True
+        )
+        body = (
+            g.InstanceOnPoints(g.Points(1), instance=protein)
+            >> nodes.geometry.SetCollider(shape="Sphere")
+            >> nodes.geometry.SetDensity(density=20.0)
+        )
+        strand = (
+            g.CurveLine(start=(-0.6, 0.0, 0.55), end=(0.6, 0.0, 0.55))
+            >> g.ResampleCurve(mode="Length", length=0.12)
+            >> nodes.geometry.SetParticles(mass=0.1, radius=0.04)
+            >> nodes.geometry.SetAffinity()
+        )
+        g.JoinGeometry([body, strand]) >> tree.outputs.geometry("Geometry")
+    source = demos._source_object("BindingTest", tree.tree)
+    sim = demos._new_simulation(bpy.context, source)
+    item = sim.props
+    item.solver = "XPBD"
+    item.gravity = 0.0
+    item.use_ground_plane = False
+    item.bend_ke = 1.0e3
+    item.temperature = temperature
+    item.drag = 5.0 if temperature else 0.0
+    item.binding_depth = depth
+    return sim
+
+
+@pytest.mark.parametrize(
+    ("patch", "temperature", "depth", "bound"),
+    [
+        (True, 0.05, 0.0, (0.0, 0.0)),
+        (True, 0.05, 0.5, (0.3, 0.9)),
+        (False, 0.05, 0.5, (0.9, 1.0)),
+        (True, 0.5, 0.5, (0.0, 0.1)),
+    ],
+    ids=["off", "patch", "everywhere", "hot"],
+)
+def test_binding(patch, temperature, depth, bound):
+    """Particles with affinity stick to binding sites: only to the patch when
+    sites are a patch, all round when they cover the protein, and they come
+    off when the temperature is as deep as the well."""
+    sim = _binding_scene(patch, temperature, depth)
+    fraction = []
+    _run(sim, 100)
+    for f in range(102, 302):
+        get_scene().frame_set(f)
+        fraction.append(sim._particle_bound.numpy().mean())
+    assert bound[0] <= np.mean(fraction) <= bound[1]
+    if patch and depth:
+        q = sim.state_0.body_q.numpy()[0]  # ty: ignore[unresolved-attribute]
+        local = Rotation.from_quat(q[3:7]).inv().apply(sim.particle_positions - q[:3])
+        is_bound = sim._particle_bound.numpy().astype(bool)
+        # The cap's sites start at z = 0.24; a bound bead is within 2 widths
+        assert (local[is_bound, 2] > 0.24 - 2 * sim.props.binding_width).all()
+
+
+def test_binding_conserves_momentum():
+    """Binding forces are equal and opposite: from rest, with no drag or
+    thermostat, the strand and protein pull together but the total momentum
+    stays zero."""
+    sim = _binding_scene(patch=False, temperature=0.0, depth=0.5)
+    _run(sim, 30)
+    strand = sim.model.particle_mass.numpy()[:, None] * sim.state_0.particle_qd.numpy()  # ty: ignore[unresolved-attribute]
+    body = sim.model.body_mass.numpy()[0] * sim.state_0.body_qd.numpy()[0, :3]  # ty: ignore[unresolved-attribute]
+    assert np.linalg.norm(body) > 1e-3, "the protein was pulled"
+    np.testing.assert_allclose(
+        strand.sum(axis=0), -body, atol=0.05 * np.linalg.norm(body)
+    )
+
+
+def _typed_scene(rows: list[tuple[int, int, float]]) -> Simulator:
+    """Two proteins with facing interface patches (types 1 and 2) and top
+    patches (types 4 and 5), a type-3 strand across their tops, and the
+    interaction table ``rows`` (type a, type b, depth). The first row's depth
+    is the "Depth" modifier input, so it can be changed live."""
+    with g.tree("Warbler Typed Test", clear=True, is_modifier=True) as tree:
+        live = tree.inputs.float("Depth", rows[0][2] if rows else 0.0)
+
+        def protein(x: float, facing: float, interface: int, top: int):
+            normal = g.Normal().o.normal
+            mesh = nodes.geometry.SetBindingSites(
+                g.IcoSphere(radius=0.4, subdivisions=3),
+                normal.x * facing > 0.8,
+                type=interface,
+            ) >> nodes.geometry.SetBindingSites(selection=normal.z > 0.6, type=top)
+            return (
+                g.InstanceOnPoints(g.Points(1, position=(x, 0.0, 0.0)), instance=mesh)
+                >> nodes.geometry.SetCollider(shape="Sphere")
+                >> nodes.geometry.SetDensity(density=20.0)
+            )
+
+        strand = (
+            g.CurveLine(start=(-1.0, 0.0, 0.55), end=(1.0, 0.0, 0.55))
+            >> g.ResampleCurve(mode="Length", length=0.12)
+            >> nodes.geometry.SetParticles(mass=0.1, radius=0.04)
+            >> nodes.geometry.SetAffinity(type=3)
+        )
+        table = [
+            nodes.geometry.Interaction(a, b, depth=live if k == 0 else depth)
+            for k, (a, b, depth) in enumerate(rows)
+        ]
+        parts = [protein(-0.45, 1, 1, 4), protein(0.45, -1, 2, 5), strand, *table]
+        g.JoinGeometry(parts) >> tree.outputs.geometry("Geometry")
+    source = demos._source_object("TypedTest", tree.tree)
+    sim = demos._new_simulation(bpy.context, source)
+    item = sim.props
+    item.solver = "XPBD"
+    item.gravity = 0.0
+    item.use_ground_plane = False
+    item.bend_ke = 1.0e3
+    item.temperature = 0.05
+    item.drag = 5.0
+    return sim
+
+
+def _bound_to(sim: Simulator) -> tuple[int, int, list[int]]:
+    """Beads bound nearer protein A, nearer B, and each protein's partners."""
+    q = sim.state_0.body_q.numpy()  # ty: ignore[unresolved-attribute]
+    x = sim.particle_positions
+    bound = sim._particle_bound.numpy().astype(bool)
+    near_a = np.linalg.norm(x - q[0, :3], axis=1) < np.linalg.norm(x - q[1, :3], axis=1)
+    partners = sim._body_partners.numpy()[:2].tolist()
+    return int((bound & near_a).sum()), int((bound & ~near_a).sum()), partners
+
+
+@pytest.mark.parametrize(
+    ("rows", "dna_on_a", "dna_on_b", "dimer"),
+    [
+        ([(1, 2, 0.5)], False, False, True),
+        ([(4, 3, 0.5)], True, False, False),
+        ([(5, 3, 0.5)], False, True, False),
+        ([(1, 2, 0.5), (4, 3, 0.5)], True, False, True),
+        ([(1, 1, 0.5)], False, False, False),
+    ],
+    ids=["dimer", "dna-on-a", "dna-on-b", "both", "unmatched"],
+)
+def test_interaction_table(rows, dna_on_a, dna_on_b, dimer):
+    """Only the type pairs the table lists attract: interface patches pair the
+    proteins, top patches bind the strand, each to its own protein."""
+    sim = _typed_scene(rows)
+    _run(sim, 150)
+    on_a, on_b, partners = _bound_to(sim)
+    assert (on_a > 0) == dna_on_a
+    assert (on_b > 0) == dna_on_b
+    assert partners == ([1, 1] if dimer else [0, 0])
+
+
+def test_interaction_rows_are_not_particles():
+    """Table rows are read from the source's points, not simulated."""
+    sim = _typed_scene([(4, 3, 0.5), (1, 2, 0.5)])
+    get_scene().frame_set(1)
+    sim.compile()
+    output = sim.parts[0].output
+    assert output is not None
+    assert sim.model.particle_count == len(output)  # the strand
+    assert len(sim.parts) == 1 and sim.parts[0].component == "curves"
+    out = output.object.data.attributes  # ty: ignore[unresolved-attribute]
+    assert "interaction" not in out and "interaction_depth" not in out
+
+
+def test_interaction_table_is_live():
+    """A table row's depth is re-read every frame: turning it off releases
+    the strand without a re-compile or a re-recorded frame."""
+    sim = _typed_scene([(4, 3, 0.5)])
+    _run(sim, 100)
+    assert _bound_to(sim)[0] > 0
+    graph = sim._graph
+    source = sim.props.source
+    assert source is not None
+    demos.set_modifier_input(source, "Depth", 0.0)
+    for f in range(102, 152):
+        get_scene().frame_set(f)
+    assert _bound_to(sim)[0] == 0
+    assert sim._graph is graph
+
+
+@pytest.mark.parametrize("shape", ["Sphere", "Convex Hull"])
+def test_binding_does_not_spin_bodies_up(shape):
+    """Bound beads rest in their wells instead of being pulled into the
+    collider: a sustained push makes Newton's contacts leak angular momentum
+    (the world normal lags the rotating contact point) and spin the body up
+    without end. Frictionless, nothing else damps that."""
+    with g.tree("Warbler Spin Test", clear=True, is_modifier=True) as tree:
+        mesh = nodes.geometry.SetBindingSites(g.IcoSphere(radius=0.4, subdivisions=3))
+        if shape == "Convex Hull":
+            lumps = g.NoiseTexture(scale=1.5, detail=1.0).o.fac
+            mesh = mesh >> g.SetPosition(
+                offset=g.Normal().o.normal * ((lumps - 0.5) * 0.36)
+            )
+        body = (
+            g.InstanceOnPoints(g.Points(1), instance=mesh)
+            >> nodes.geometry.SetCollider(shape=shape)
+            >> nodes.geometry.SetDensity(density=5.0)
+        )
+        strand = (
+            g.CurveLine(start=(-0.8, 0.0, 0.5), end=(0.8, 0.0, 0.5))
+            >> g.ResampleCurve(mode="Length", length=0.12)
+            >> nodes.geometry.SetParticles(mass=0.1, radius=0.04)
+            >> nodes.geometry.SetAffinity()
+        )
+        g.JoinGeometry([body, strand]) >> tree.outputs.geometry("Geometry")
+    source = demos._source_object("SpinTest", tree.tree)
+    sim = demos._new_simulation(bpy.context, source)
+    item = sim.props
+    item.solver = "XPBD"
+    item.gravity = 0.0
+    item.use_ground_plane = False
+    item.temperature = item.drag = 0.0
+    item.bend_ke = 1.0e3
+    item.instance_mu = item.soft_contact_mu = 0.0
+    _run(sim, 60)
+    spin = []
+    for f in range(62, 302):
+        get_scene().frame_set(f)
+        spin.append(np.linalg.norm(sim.state_0.body_qd.numpy()[0, 3:]))  # ty: ignore[unresolved-attribute]
+    assert max(spin[-60:]) < max(spin[:60]) + 0.5, "the body spun up"
+    assert max(spin) < 5.0
+
+
+@pytest.mark.parametrize("kind", ["CONVEX_HULL", "BOX", "SPHERE", "CAPSULE"])
+def test_sites_lie_on_the_collider(kind):
+    """Binding sites are moved onto the shape the body collides with, with
+    unit outward normals."""
+    rng = np.random.default_rng(0)
+    vertices = rng.normal(size=(200, 3)) * (0.5, 0.3, 0.2)
+    sites = np.zeros(len(vertices), dtype=bool)
+    sites[::7] = True
+    mesh = newton.Mesh(vertices, np.zeros(3, dtype=np.int32), compute_inertia=False)
+    hull = mesh.compute_convex_hull() if kind == "CONVEX_HULL" else None
+    geometry = ReferenceMesh(vertices, np.zeros((0, 3), dtype=np.int32), None)
+    scale = np.array([1.0, 2.0, 1.0])
+    local, normal = collider_surface(kind, geometry, scale, sites, hull)
+    np.testing.assert_allclose(np.linalg.norm(normal, axis=1), 1.0, atol=1e-6)
+    scaled = vertices * scale
+    centre = (scaled.min(0) + scaled.max(0)) / 2
+    half = (scaled.max(0) - scaled.min(0)) / 2
+    if kind == "SPHERE":
+        np.testing.assert_allclose(np.linalg.norm(local - centre, axis=1), half.max())
+    elif kind == "BOX":
+        np.testing.assert_allclose(np.abs((local - centre) / half).max(axis=1), 1.0)
+    elif kind == "CONVEX_HULL":
+        assert hull is not None
+        corners = np.asarray(hull.vertices) * scale
+        # On the hull: no corner lies beyond any site's tangent plane
+        beyond = (
+            np.einsum("sj,cj->sc", normal, corners)
+            - np.einsum("sj,sj->s", normal, local)[:, None]
+        )
+        assert beyond.max() < 1e-4
+    assert (np.einsum("ij,ij->i", normal, local - centre) > 0).all(), "outward"
+
+
+def test_nucleosomes_wrap_and_hold():
+    """One DNA curve wound 1.5 turns round each histone; the wraps hold in
+    the bath, kept by the groove's binding sites alone (the DNA rests
+    straight)."""
+    sim = demos.nucleosomes(bpy.context)
+    get_scene().frame_set(1)
+    sim.compile()
+    part = sim.parts[0]
+    assert part.curve_sizes is not None and len(part.curve_sizes) == 1
+    assert sim.model.body_count == 6
+    assert sim.props.bend_rest_straight
+    bonds = np.linalg.norm(np.diff(sim.particle_positions, axis=0), axis=1)
+    np.testing.assert_allclose(bonds, 0.15, rtol=0.02)  # no gaps between units
+    q = _run(sim, 150)
+    centres = sim.state_0.body_q.numpy()[:, :3]  # ty: ignore[unresolved-attribute]
+    wrapped = (np.linalg.norm(q[:, None] - centres[None], axis=2) < 0.45).sum(axis=0)
+    # 1.5 turns at 0.35 from the axis is ~22 beads
+    assert (wrapped >= 18).all()
+    # The DNA rests straight, so only binding holds it on
+    springs = sim.model.spring_rest_length.numpy()  # ty: ignore[unresolved-attribute]
+    assert np.isclose(springs, 0.3, rtol=0.02).sum() > 100
+
+
+def _nucleosome_drift(slide: bool) -> float:
+    """Median distance wrapped beads move along one histone, in its frame,
+    while the DNA's last end is pulled 1 unit."""
+    sim = demos.nucleosomes(bpy.context)
+    source = sim.props.source
+    assert source is not None
+    demos.set_modifier_input(source, "Histones", 1)
+    demos.set_modifier_input(source, "Slide", slide)
+    demos.set_modifier_input(source, "Pin Ends", True)
+    get_scene().frame_set(1)
+    sim.compile()
+
+    def local() -> np.ndarray:
+        q = sim.state_0.body_q.numpy()[0]  # ty: ignore[unresolved-attribute]
+        return Rotation.from_quat(q[3:7]).inv().apply(sim.particle_positions - q[:3])
+
+    start = local()
+    for f in range(2, 302):
+        demos.set_modifier_input(source, "Pull", min(f, 200) / 200)
+        get_scene().frame_set(f)
+    end = local()
+    still = (np.linalg.norm(start[:, :2], axis=1) < 0.45) & (
+        np.linalg.norm(end[:, :2], axis=1) < 0.45
+    )
+    assert still.sum() >= 15, "the wrap held"
+    return float(np.median(np.linalg.norm(end[still] - start[still], axis=1)))
+
+
+def test_nucleosome_slide_or_stick():
+    """With a sliding groove the wrapped DNA moves along the histone when
+    pulled; with one site per bead each bead keeps its place on it (the
+    histone turns instead)."""
+    assert _nucleosome_drift(slide=True) > 0.1
+    assert _nucleosome_drift(slide=False) < 0.06
+
+
+@pytest.mark.parametrize("straight", [False, True])
+def test_bend_rest_shape(straight):
+    """Curves rest in their starting shape, or straight: a half circle stays
+    put, or starts to open (i → i+2 springs resist gentle bends weakly, so
+    slowly)."""
+    with g.tree("Warbler Arc Test", clear=True, is_modifier=True) as tree:
+        (
+            g.Arc(resolution=30, radius=0.5, sweep_angle=math.pi)
+            >> nodes.geometry.SetParticles(mass=0.1, radius=0.02)
+            >> tree.outputs.geometry("Geometry")
+        )
+    source = demos._source_object("ArcTest", tree.tree)
+    sim = demos._new_simulation(bpy.context, source)
+    sim.props.solver = "XPBD"
+    sim.props.gravity = 0.0
+    sim.props.use_ground_plane = False
+    sim.props.bend_ke = 1.0e3
+    sim.props.bend_rest_straight = straight
+    get_scene().frame_set(1)
+    sim.compile()
+    span = np.linalg.norm(sim.particle_positions[-1] - sim.particle_positions[0])
+    q = _run(sim, 120)
+    grown = np.linalg.norm(q[-1] - q[0]) / span
+    assert grown > 1.03 if straight else grown == pytest.approx(1.0, abs=0.005)
 
 
 GROUPS = [getattr(nodes.geometry, name) for name in nodes.geometry.__all__]
