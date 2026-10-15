@@ -1,0 +1,13 @@
+# This is an Asset Catalog Definition file for Blender.
+#
+# Empty lines and lines starting with `#` will be ignored.
+# The first non-ignored line should be the version indicator.
+# Other lines are of the format "UUID:catalog/path/for/assets:simple catalog name"
+
+VERSION 1
+
+528312ea-7ac0-4a6e-8f71-430a1c2d0090:Warbler:Warbler
+ba19136a-743e-4b12-acd6-6f4da209c863:Warbler/Particles:Warbler-Particles
+e169a26f-7114-4f10-a7cb-559a01c4a7be:Warbler/Rigid Bodies:Warbler-Rigid Bodies
+1d6063ad-2abb-4cca-9bb6-26d4a371d155:Warbler/Generators:Warbler-Generators
+54890066-5295-4dce-b842-0370f7024048:Warbler/Outputs:Warbler-Outputs
